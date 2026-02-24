@@ -81,3 +81,11 @@ class AlertSeverity(StrEnum):
     INFO = "info"
     WARNING = "warning"
     CRITICAL = "critical"
+
+
+class RebalanceAction(StrEnum):
+    """Outcome of inventory reconciliation at a window transition."""
+
+    ROLLOVER = "rollover"        # marginal delta rebalance
+    FORCE_EXIT = "force_exit"    # pair dropped, full liquidation
+    NO_CHANGE = "no_change"      # inventory already at target
