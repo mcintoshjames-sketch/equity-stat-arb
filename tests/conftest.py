@@ -97,8 +97,8 @@ def synthetic_cointegrated_prices() -> pd.DataFrame:
     Creates two series: Y = beta * X + noise, where noise is mean-reverting.
     """
     np.random.seed(42)
-    n = 300
-    dates = pd.bdate_range(start="2023-01-01", periods=n)
+    n = 500
+    dates = pd.bdate_range(start="2022-01-01", periods=n)
 
     # Random walk for X
     x_returns = np.random.normal(0.0005, 0.02, n)
@@ -107,7 +107,7 @@ def synthetic_cointegrated_prices() -> pd.DataFrame:
     # Y cointegrated with X: Y = 1.2 * X + OU noise
     beta = 1.2
     intercept = 5.0
-    theta = 0.1  # mean reversion speed
+    theta = 0.3  # strong mean reversion speed
     noise = np.zeros(n)
     for i in range(1, n):
         noise[i] = noise[i - 1] * (1 - theta) + np.random.normal(0, 1.0)

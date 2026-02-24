@@ -43,3 +43,5 @@ docker/.env
 output/
 reports/
 *.sqlite
+SCHWAB_AUTH_SETUP.md
+SCHWAB_API_PRIMER.md
