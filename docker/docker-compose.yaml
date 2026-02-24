@@ -1,0 +1,56 @@
+# Deployment on mrm-x86 (Tailscale: 100.87.161.31)
+#
+# Start:  docker compose -f docker/docker-compose.yaml up -d
+# Logs:   docker compose -f docker/docker-compose.yaml logs -f
+# Stop:   docker compose -f docker/docker-compose.yaml down
+
+services:
+  # --- Single-step paper trading (default, cron-scheduled) ---
+  live-paper:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["run-live"]
+    environment:
+      - BROKER_MODE=paper
+      - LOOP=false
+      - SCHWAB_APP_KEY=${SCHWAB_APP_KEY}
+      - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET}
+    volumes:
+      - stat-arb-data:/data
+      - ${SCHWAB_TOKENS_DB:-~/.schwabdev/tokens.db}:/home/statarb/.schwabdev/tokens.db
+    restart: "no"
+
+  # --- Continuous loop paper trading ---
+  live-loop:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["run-live"]
+    environment:
+      - BROKER_MODE=paper
+      - LOOP=true
+      - SCHWAB_APP_KEY=${SCHWAB_APP_KEY}
+      - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET}
+    volumes:
+      - stat-arb-data:/data
+      - ${SCHWAB_TOKENS_DB:-~/.schwabdev/tokens.db}:/home/statarb/.schwabdev/tokens.db
+    restart: unless-stopped
+    profiles: ["loop"]
+
+  # --- Backtest runner (ad-hoc) ---
+  backtest:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["run-backtest", "--start", "${BT_START:-2024-06-01}", "--end", "${BT_END:-2025-12-31}"]
+    environment:
+      - SCHWAB_APP_KEY=${SCHWAB_APP_KEY}
+      - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET}
+    volumes:
+      - stat-arb-data:/data
+      - ${SCHWAB_TOKENS_DB:-~/.schwabdev/tokens.db}:/home/statarb/.schwabdev/tokens.db
+    profiles: ["backtest"]
+
+volumes:
+  stat-arb-data:
