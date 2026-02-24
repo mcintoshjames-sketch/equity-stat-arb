@@ -385,6 +385,7 @@ def load_config(path: str | Path) -> AppConfig:
     Environment variable overrides (applied after YAML loading):
       - ``SCHWAB_APP_KEY`` → ``schwab.app_key``
       - ``SCHWAB_APP_SECRET`` → ``schwab.app_secret``
+      - ``SCHWAB_TOKENS_DB`` → ``schwab.tokens_db``
       - ``STAT_ARB_DB_URL`` → ``database.url``
       - ``BROKER_MODE`` → ``broker_mode``
 
@@ -404,12 +405,14 @@ def load_config(path: str | Path) -> AppConfig:
     with path.open() as f:
         raw: dict[str, Any] = yaml.safe_load(f)
 
-    # Allow env var overrides for credentials
+    # Allow env var overrides for credentials and paths
     schwab = raw.get("schwab", {})
     if os.environ.get("SCHWAB_APP_KEY"):
         schwab["app_key"] = os.environ["SCHWAB_APP_KEY"]
     if os.environ.get("SCHWAB_APP_SECRET"):
         schwab["app_secret"] = os.environ["SCHWAB_APP_SECRET"]
+    if os.environ.get("SCHWAB_TOKENS_DB"):
+        schwab["tokens_db"] = os.environ["SCHWAB_TOKENS_DB"]
 
     # Allow env var override for database URL (e.g. Docker → /data/stat_arb.db)
     if os.environ.get("STAT_ARB_DB_URL"):

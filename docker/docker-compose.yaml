@@ -18,7 +18,6 @@ services:
       - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET}
     volumes:
       - stat-arb-data:/data
-      - ${SCHWAB_TOKENS_DB:-~/.schwabdev/tokens.db}:/home/statarb/.schwabdev/tokens.db
     restart: "no"
 
   # --- Continuous loop paper trading ---
@@ -34,7 +33,6 @@ services:
       - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET}
     volumes:
       - stat-arb-data:/data
-      - ${SCHWAB_TOKENS_DB:-~/.schwabdev/tokens.db}:/home/statarb/.schwabdev/tokens.db
     restart: unless-stopped
     profiles: ["loop"]
 
@@ -49,7 +47,6 @@ services:
       - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET}
     volumes:
       - stat-arb-data:/data
-      - ${SCHWAB_TOKENS_DB:-~/.schwabdev/tokens.db}:/home/statarb/.schwabdev/tokens.db
     profiles: ["backtest"]
 
 volumes:

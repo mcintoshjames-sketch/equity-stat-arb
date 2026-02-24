@@ -40,6 +40,7 @@ VOLUME /data
 # Default env: paper mode, SQLite in /data
 ENV STAT_ARB_CONFIG=/app/config/default.yaml \
     STAT_ARB_DB_URL="sqlite:////data/stat_arb.db" \
+    SCHWAB_TOKENS_DB="/data/tokens.db" \
     BROKER_MODE=paper \
     PYTHONPATH=/app/src
 
