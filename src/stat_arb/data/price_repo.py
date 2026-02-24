@@ -4,6 +4,9 @@
 prices throughout the system.  It queries the local database first and
 transparently backfills missing symbols from the Schwab API when a
 :class:`SchwabDataClient` is provided.
+
+Bulk upserts use dialect-aware ``INSERT … ON CONFLICT DO UPDATE`` for
+both SQLite and PostgreSQL, avoiding slow row-by-row ORM merges.
 """
 
 from __future__ import annotations
@@ -15,13 +18,35 @@ from typing import TYPE_CHECKING
 import pandas as pd
 from sqlalchemy import func, select
 
-from stat_arb.data.db import get_session
+from stat_arb.data.db import get_engine, get_session
 from stat_arb.data.schemas import DailyPrice
 
 if TYPE_CHECKING:
     from stat_arb.data.schwab_client import SchwabDataClient
 
 logger = logging.getLogger(__name__)
+
+# Columns updated on conflict (everything except PK, symbol, trade_date)
+_UPSERT_SET = {"open", "high", "low", "close", "volume"}
+
+
+def _dialect_insert():
+    """Return the dialect-specific ``insert`` function for the active engine.
+
+    SQLite and PostgreSQL both support ``ON CONFLICT DO UPDATE`` but
+    require different SQLAlchemy dialect imports.
+    """
+    engine = get_engine()
+    dialect_name = engine.dialect.name
+
+    if dialect_name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert
+    elif dialect_name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    else:
+        raise RuntimeError(f"Unsupported dialect for bulk upsert: {dialect_name}")
+
+    return insert
 
 
 class PriceRepository:
@@ -111,7 +136,10 @@ class PriceRepository:
         return (row[0], row[1])
 
     def upsert_prices(self, symbol: str, df: pd.DataFrame) -> int:
-        """Insert or update price data from a DataFrame.
+        """Bulk insert-or-update price data from a DataFrame.
+
+        Uses dialect-aware ``INSERT … ON CONFLICT DO UPDATE`` for
+        performance (single statement per batch, no row-by-row ORM round-trips).
 
         Args:
             symbol: Ticker symbol for all rows.
@@ -123,43 +151,9 @@ class PriceRepository:
         if df.empty:
             return 0
 
-        session = get_session()
-        count = 0
-        try:
-            for dt, row in df.iterrows():
-                trade_date = dt.date() if hasattr(dt, "date") else dt
-                existing = session.execute(
-                    select(DailyPrice).where(
-                        DailyPrice.symbol == symbol,
-                        DailyPrice.trade_date == trade_date,
-                    )
-                ).scalar_one_or_none()
-
-                if existing:
-                    existing.open = float(row["open"])
-                    existing.high = float(row["high"])
-                    existing.low = float(row["low"])
-                    existing.close = float(row["close"])
-                    existing.volume = int(row["volume"])
-                else:
-                    session.add(DailyPrice(
-                        symbol=symbol,
-                        trade_date=trade_date,
-                        open=float(row["open"]),
-                        high=float(row["high"]),
-                        low=float(row["low"]),
-                        close=float(row["close"]),
-                        volume=int(row["volume"]),
-                    ))
-                count += 1
-            session.commit()
-            logger.info("Upserted %d price rows for %s", count, symbol)
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-
+        rows = _df_to_row_dicts(symbol, df)
+        count = _bulk_upsert(rows)
+        logger.info("Upserted %d price rows for %s", count, symbol)
         return count
 
     # ------------------------------------------------------------------
@@ -169,7 +163,8 @@ class PriceRepository:
     def _backfill_symbol(self, symbol: str) -> int:
         """Fetch 2-year history from Schwab and bulk-insert into the DB.
 
-        Uses ``session.merge`` to handle duplicates gracefully (insert-or-update).
+        Uses ``INSERT … ON CONFLICT DO UPDATE`` to handle duplicates
+        gracefully in a single bulk statement.
 
         Returns:
             Number of rows persisted.
@@ -182,27 +177,61 @@ class PriceRepository:
             logger.warning("Schwab returned no data for %s", symbol)
             return 0
 
-        session = get_session()
-        count = 0
-        try:
-            for dt, row in df.iterrows():
-                price = DailyPrice(
-                    symbol=symbol,
-                    trade_date=dt.date(),
-                    open=float(row["open"]),
-                    high=float(row["high"]),
-                    low=float(row["low"]),
-                    close=float(row["close"]),
-                    volume=int(row["volume"]),
-                )
-                session.merge(price)
-                count += 1
-            session.commit()
-            logger.info("Backfilled %d rows for %s", count, symbol)
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-
+        rows = _df_to_row_dicts(symbol, df)
+        count = _bulk_upsert(rows)
+        logger.info("Backfilled %d rows for %s", count, symbol)
         return count
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _df_to_row_dicts(symbol: str, df: pd.DataFrame) -> list[dict]:
+    """Convert a DataFrame with DatetimeIndex + OHLCV columns to row dicts."""
+    rows: list[dict] = []
+    for dt, row in df.iterrows():
+        trade_date = dt.date() if hasattr(dt, "date") else dt
+        rows.append({
+            "symbol": symbol,
+            "trade_date": trade_date,
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": int(row["volume"]),
+        })
+    return rows
+
+
+def _bulk_upsert(rows: list[dict]) -> int:
+    """Execute a bulk INSERT … ON CONFLICT DO UPDATE for DailyPrice rows.
+
+    On conflict with the ``(symbol, trade_date)`` unique constraint,
+    updates OHLCV columns to the new values.
+
+    Returns:
+        Number of rows in the batch.
+    """
+    if not rows:
+        return 0
+
+    insert = _dialect_insert()
+    stmt = insert(DailyPrice).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["symbol", "trade_date"],
+        set_={col: stmt.excluded[col] for col in _UPSERT_SET},
+    )
+
+    session = get_session()
+    try:
+        session.execute(stmt)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    return len(rows)
