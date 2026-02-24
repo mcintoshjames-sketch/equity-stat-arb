@@ -1,6 +1,9 @@
 schwab:
-  app_key: "YOUR_APP_KEY"
-  app_secret: "YOUR_APP_SECRET"
+  # Override with real credentials in config/local.yaml (git-ignored)
+  # or set SCHWAB_APP_KEY / SCHWAB_APP_SECRET env vars.
+  # See SCHWAB_AUTH_SETUP.md for details.
+  app_key: "YOUR_APP_KEY_HERE"
+  app_secret: "YOUR_APP_SECRET_HERE"
   callback_url: "https://127.0.0.1"
   tokens_db: "~/.schwabdev/tokens.db"
   account_hash: null

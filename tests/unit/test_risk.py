@@ -101,18 +101,20 @@ class TestRiskManager:
 
     def test_sector_cap_rejection(self) -> None:
         """Entry rejected when sector would exceed concentration limit."""
-        cfg = RiskConfig(max_sector_pct=0.30, max_gross_exposure=100_000.0)
+        # Sector concentration measured against max_gross_exposure.
+        # All 2 existing pairs are in tech, gross_exposure = 5000.
+        # sector_gross ≈ (2/2)*5000 = 5000, new trade adds 1000.
+        # sector_pct = (5000 + 1000) / 10_000 = 0.60 > 0.30
+        # gross check passes: 5000 + 1000 = 6000 < 10_000.
+        cfg = RiskConfig(max_sector_pct=0.30, max_gross_exposure=10_000.0)
         rm = RiskManager(cfg)
-        # Register existing pairs in same sector
         rm.register_pair(1, "tech")
         rm.register_pair(2, "tech")
 
         event = _make_event(Signal.LONG_SPREAD, sector="tech")
         size = SizeResult(qty_y=10, qty_x=10, notional_y=500, notional_x=500)
-        broker = _mock_broker(gross_exposure=2000.0)
+        broker = _mock_broker(gross_exposure=5000.0)
         decision = rm.check(event, size, broker, active_pair_count=2)
-        # sector gross ≈ (2/2)*2000 = 2000, total = 2000 + 1000 = 3000
-        # sector pct = (2000 + 1000) / 3000 = 1.0 > 0.30
         assert decision.decision == RiskDecisionType.REJECTED
         assert "sector" in decision.reason
 

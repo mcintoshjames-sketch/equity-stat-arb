@@ -59,6 +59,7 @@ class PriceRepository:
 
     def __init__(self, schwab_client: SchwabDataClient | None = None) -> None:
         self._schwab = schwab_client
+        self._backfilled: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -102,14 +103,18 @@ class PriceRepository:
         else:
             pivot = pd.DataFrame()
 
-        # Identify missing symbols and backfill
+        # Identify missing symbols and backfill (once per symbol per session)
         found = set(pivot.columns) if not pivot.empty else set()
-        missing = [s for s in symbols if s not in found]
+        missing = [
+            s for s in symbols
+            if s not in found and s not in self._backfilled
+        ]
 
         if missing and self._schwab is not None:
             logger.info("Backfilling %d symbols from Schwab: %s", len(missing), missing)
             for sym in missing:
                 self._backfill_symbol(sym)
+                self._backfilled.add(sym)
 
             # Re-query after backfill
             return self.get_close_prices(symbols, start, end)

@@ -382,6 +382,10 @@ class AppConfig(BaseModel):
 def load_config(path: str | Path) -> AppConfig:
     """Load and validate ``AppConfig`` from a YAML file.
 
+    Environment variable overrides (applied after YAML loading):
+      - ``SCHWAB_APP_KEY`` → ``schwab.app_key``
+      - ``SCHWAB_APP_SECRET`` → ``schwab.app_secret``
+
     Args:
         path: Filesystem path to the YAML configuration file.
 
@@ -392,7 +396,17 @@ def load_config(path: str | Path) -> AppConfig:
         FileNotFoundError: If *path* does not exist.
         pydantic.ValidationError: If YAML contents fail validation.
     """
+    import os
+
     path = Path(path)
     with path.open() as f:
         raw: dict[str, Any] = yaml.safe_load(f)
+
+    # Allow env var overrides for credentials
+    schwab = raw.get("schwab", {})
+    if os.environ.get("SCHWAB_APP_KEY"):
+        schwab["app_key"] = os.environ["SCHWAB_APP_KEY"]
+    if os.environ.get("SCHWAB_APP_SECRET"):
+        schwab["app_secret"] = os.environ["SCHWAB_APP_SECRET"]
+
     return AppConfig(**raw)

@@ -89,8 +89,15 @@ def main(argv: list[str] | None = None) -> None:
     # 4. Universe
     universe = load_universe(cfg.universe)
 
-    # 5. Price repository
-    schwab_client = SchwabDataClient(cfg.schwab)
+    # 5. Price repository (Schwab client optional — falls back to DB-only)
+    schwab_client: SchwabDataClient | None = None
+    try:
+        schwab_client = SchwabDataClient(cfg.schwab)
+    except (ValueError, Exception) as exc:  # noqa: BLE001
+        print(f"WARNING: Schwab client init failed ({exc}); running DB-only.")
+        print("  Price data must already exist in the database.")
+        print("  Update schwab.app_key / app_secret in your config to enable backfill.")
+        print()
     price_repo = PriceRepository(schwab_client=schwab_client)
 
     # 6. Discovery

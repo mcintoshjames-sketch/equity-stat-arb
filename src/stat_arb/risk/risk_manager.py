@@ -118,9 +118,11 @@ class RiskManager:
             )
 
         # 4. Sector concentration
+        # Measured against max_gross_exposure to avoid bootstrap problem
+        # where the first trade is always 100% of (currently empty) portfolio.
         sector = event.pair.sector
         sector_gross = self._sector_gross(sector, broker)
-        total_gross = max(proposed_gross, 1.0)
+        total_gross = max(self._config.max_gross_exposure, 1.0)
         sector_pct = (sector_gross + size.gross_notional) / total_gross
         if sector_pct > self._config.max_sector_pct:
             return RiskDecision(
