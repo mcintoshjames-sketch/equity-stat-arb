@@ -148,6 +148,9 @@ class SignalConfig(BaseModel):
         exit_z: Absolute z-score to close — spread has mean-reverted enough.
         stop_z: Absolute z-score for divergence stop-loss.
         timeout_half_life_mult: Close after this many half-lives if not exited.
+        slippage_multiplier: Fraction of quoted half-spread used as fill
+            slippage.  0.5 = fill at mid ± 0.5 × half_spread (conservative
+            default reflecting real-world bid-ask for less-liquid names).
     """
 
     model_config = _FROZEN
@@ -156,8 +159,12 @@ class SignalConfig(BaseModel):
     exit_z: float = 0.5
     stop_z: float = 4.0
     timeout_half_life_mult: float = 3.0
+    slippage_multiplier: float = 0.5
 
-    @field_validator("entry_z", "exit_z", "stop_z", "timeout_half_life_mult")
+    @field_validator(
+        "entry_z", "exit_z", "stop_z",
+        "timeout_half_life_mult", "slippage_multiplier",
+    )
     @classmethod
     def _positive(cls, v: float) -> float:
         if v <= 0:

@@ -92,6 +92,7 @@ signal:
   exit_z: 0.5
   stop_z: 4.0
   timeout_half_life_mult: 3.0
+  slippage_multiplier: 0.5
 
 sizing:
   dollars_per_leg: 1500.0
