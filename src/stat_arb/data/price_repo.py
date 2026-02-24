@@ -1,4 +1,10 @@
-"""DB-cached price repository with Schwab backfill on miss."""
+"""DB-cached price repository with Schwab backfill on cache miss.
+
+:class:`PriceRepository` is the single entry-point for historical close
+prices throughout the system.  It queries the local database first and
+transparently backfills missing symbols from the Schwab API when a
+:class:`SchwabDataClient` is provided.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +13,7 @@ from datetime import date
 from typing import TYPE_CHECKING
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from stat_arb.data.db import get_session
 from stat_arb.data.schemas import DailyPrice
@@ -19,10 +25,19 @@ logger = logging.getLogger(__name__)
 
 
 class PriceRepository:
-    """Serves close-price DataFrames, backfilling from Schwab when the DB lacks data."""
+    """Serves close-price DataFrames, backfilling from Schwab when the DB lacks data.
+
+    Args:
+        schwab_client: Optional API client for automatic backfill.
+            Pass ``None`` for offline / test usage.
+    """
 
     def __init__(self, schwab_client: SchwabDataClient | None = None) -> None:
         self._schwab = schwab_client
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def get_close_prices(
         self,
@@ -30,9 +45,16 @@ class PriceRepository:
         start: date,
         end: date,
     ) -> pd.DataFrame:
-        """Return a DataFrame of close prices indexed by date, one column per symbol.
+        """Return a pivot DataFrame of close prices indexed by date.
 
-        Missing symbols are backfilled from Schwab if a client is available.
+        Args:
+            symbols: Ticker symbols to retrieve.
+            start: First trade date (inclusive).
+            end: Last trade date (inclusive).
+
+        Returns:
+            DataFrame with ``DatetimeIndex`` and one column per symbol.
+            Missing symbols with no Schwab client return empty columns.
         """
         session = get_session()
         try:
@@ -55,7 +77,7 @@ class PriceRepository:
         else:
             pivot = pd.DataFrame()
 
-        # Identify missing symbols
+        # Identify missing symbols and backfill
         found = set(pivot.columns) if not pivot.empty else set()
         missing = [s for s in symbols if s not in found]
 
@@ -69,42 +91,35 @@ class PriceRepository:
 
         return pivot
 
-    def _backfill_symbol(self, symbol: str) -> int:
-        """Fetch full history from Schwab and persist to DB. Returns row count."""
-        if self._schwab is None:
-            return 0
+    def get_date_range(self, symbol: str) -> tuple[date, date] | None:
+        """Return the ``(min_date, max_date)`` available for a symbol, or ``None``.
 
-        df = self._schwab.fetch_price_history(symbol, period_type="year", period=2)
-        if df.empty:
-            return 0
-
+        Useful for walk-forward window scheduling to determine data coverage.
+        """
         session = get_session()
-        count = 0
         try:
-            for dt, row in df.iterrows():
-                price = DailyPrice(
-                    symbol=symbol,
-                    trade_date=dt.date(),
-                    open=float(row["open"]),
-                    high=float(row["high"]),
-                    low=float(row["low"]),
-                    close=float(row["close"]),
-                    volume=int(row["volume"]),
-                )
-                session.merge(price)
-                count += 1
-            session.commit()
-            logger.info("Backfilled %d rows for %s", count, symbol)
-        except Exception:
-            session.rollback()
-            raise
+            stmt = select(
+                func.min(DailyPrice.trade_date),
+                func.max(DailyPrice.trade_date),
+            ).where(DailyPrice.symbol == symbol)
+            row = session.execute(stmt).one()
         finally:
             session.close()
 
-        return count
+        if row[0] is None:
+            return None
+        return (row[0], row[1])
 
     def upsert_prices(self, symbol: str, df: pd.DataFrame) -> int:
-        """Insert or update price data from a DataFrame with DatetimeIndex and OHLCV columns."""
+        """Insert or update price data from a DataFrame.
+
+        Args:
+            symbol: Ticker symbol for all rows.
+            df: DataFrame with ``DatetimeIndex`` and OHLCV columns.
+
+        Returns:
+            Number of rows processed.
+        """
         if df.empty:
             return 0
 
@@ -138,6 +153,52 @@ class PriceRepository:
                     ))
                 count += 1
             session.commit()
+            logger.info("Upserted %d price rows for %s", count, symbol)
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+        return count
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _backfill_symbol(self, symbol: str) -> int:
+        """Fetch 2-year history from Schwab and bulk-insert into the DB.
+
+        Uses ``session.merge`` to handle duplicates gracefully (insert-or-update).
+
+        Returns:
+            Number of rows persisted.
+        """
+        if self._schwab is None:
+            return 0
+
+        df = self._schwab.fetch_price_history(symbol, period_type="year", period=2)
+        if df.empty:
+            logger.warning("Schwab returned no data for %s", symbol)
+            return 0
+
+        session = get_session()
+        count = 0
+        try:
+            for dt, row in df.iterrows():
+                price = DailyPrice(
+                    symbol=symbol,
+                    trade_date=dt.date(),
+                    open=float(row["open"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                    volume=int(row["volume"]),
+                )
+                session.merge(price)
+                count += 1
+            session.commit()
+            logger.info("Backfilled %d rows for %s", count, symbol)
         except Exception:
             session.rollback()
             raise

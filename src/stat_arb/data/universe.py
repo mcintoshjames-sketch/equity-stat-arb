@@ -1,4 +1,9 @@
-"""Symbol universe and sector mapping."""
+"""Symbol universe and sector mapping.
+
+The :class:`Universe` is a frozen dataclass built from ``UniverseConfig``
+that provides the tradable symbol pool and all intra-sector pair
+combinations for the discovery pipeline.
+"""
 
 from __future__ import annotations
 
@@ -14,15 +19,25 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Universe:
-    """Holds the symbol universe with sector mappings."""
+    """Immutable snapshot of the tradable symbol universe.
+
+    Attributes:
+        symbols: Flat list of all unique symbols across sectors.
+        sector_map: Mapping of symbol → sector name for quick lookup.
+        sector_symbols: Mapping of sector name → list of symbols in that sector.
+    """
 
     symbols: list[str]
-    sector_map: dict[str, str]  # symbol → sector
-    sector_symbols: dict[str, list[str]]  # sector → [symbols]
+    sector_map: dict[str, str]
+    sector_symbols: dict[str, list[str]]
 
     @property
     def sector_pairs(self) -> list[tuple[str, str, str]]:
-        """Generate all intra-sector pairs as (sym_a, sym_b, sector)."""
+        """Generate all intra-sector pairs as ``(sym_a, sym_b, sector)``.
+
+        Pairs are generated in sorted order within each sector (i < j)
+        to ensure deterministic, non-duplicate combinations.
+        """
         pairs = []
         for sector, syms in self.sector_symbols.items():
             for i in range(len(syms)):
@@ -32,7 +47,17 @@ class Universe:
 
 
 def load_universe(config: UniverseConfig) -> Universe:
-    """Build Universe from UniverseConfig sectors dict."""
+    """Build a :class:`Universe` from a ``UniverseConfig`` sectors dict.
+
+    Deduplicates symbols that appear in multiple sectors (keeping the first
+    occurrence) and logs a warning for each duplicate.
+
+    Args:
+        config: Universe configuration subsection.
+
+    Returns:
+        Frozen ``Universe`` instance ready for pair generation.
+    """
     symbols: list[str] = []
     sector_map: dict[str, str] = {}
     sector_symbols: dict[str, list[str]] = {}
@@ -44,9 +69,13 @@ def load_universe(config: UniverseConfig) -> Universe:
                 symbols.append(sym)
                 sector_map[sym] = sector
             else:
-                logger.warning("Duplicate symbol %s in sector %s (already in %s)",
-                               sym, sector, sector_map[sym])
+                logger.warning(
+                    "Duplicate symbol %s in sector %s (already in %s)",
+                    sym, sector, sector_map[sym],
+                )
 
-    logger.info("Loaded universe: %d symbols across %d sectors",
-                len(symbols), len(sector_symbols))
+    logger.info(
+        "Loaded universe: %d symbols across %d sectors",
+        len(symbols), len(sector_symbols),
+    )
     return Universe(symbols=symbols, sector_map=sector_map, sector_symbols=sector_symbols)
