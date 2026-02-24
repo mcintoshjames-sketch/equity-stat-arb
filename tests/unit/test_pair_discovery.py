@@ -75,6 +75,35 @@ def test_discovery_end_to_end(synthetic_universe: Universe, mock_price_repo: Mag
     assert pair.coint_pvalue < 0.05
 
 
+def test_min_common_obs_filters_short_series(synthetic_universe: Universe) -> None:
+    """Setting min_common_obs higher than available data should reject all pairs."""
+    np.random.seed(42)
+    # Only 50 data points — below min_common_obs=100
+    dates = pd.bdate_range(start="2023-01-01", periods=50)
+    df = pd.DataFrame(
+        {
+            "SYM_Y": np.random.randn(50) + 100,
+            "SYM_X": np.random.randn(50) + 100,
+            "SYM_Z": np.random.randn(50) + 80,
+        },
+        index=dates,
+    )
+    df.index.name = "date"
+
+    repo = MagicMock()
+    repo.get_close_prices.return_value = df
+
+    config = DiscoveryConfig(parallel_n_jobs=1, min_common_obs=100)
+    discovery = PairDiscovery(config, repo)
+
+    results = discovery.discover(
+        universe=synthetic_universe,
+        formation_start=date(2023, 1, 2),
+        formation_end=date(2023, 6, 1),
+    )
+    assert results == []
+
+
 def test_discovery_empty_prices(synthetic_universe: Universe) -> None:
     """Orchestrator should return empty list when no price data."""
     repo = MagicMock()

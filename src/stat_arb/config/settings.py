@@ -49,6 +49,24 @@ class SchwabConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Schwab broker execution settings
+# ---------------------------------------------------------------------------
+
+
+class SchwabBrokerConfig(BaseModel):
+    """Schwab broker execution configuration.
+
+    Attributes:
+        use_limit_orders: Use LIMIT orders instead of MARKET orders.
+            Safer for pairs trading where fills at a known price matter.
+    """
+
+    model_config = _FROZEN
+
+    use_limit_orders: bool = False
+
+
+# ---------------------------------------------------------------------------
 # Universe / stock pool
 # ---------------------------------------------------------------------------
 
@@ -106,6 +124,14 @@ class DiscoveryConfig(BaseModel):
     min_correlation: float = 0.78
     parallel_n_jobs: int = -1
     use_ols_fallback: bool = True
+    min_common_obs: int = 60
+
+    @field_validator("min_common_obs")
+    @classmethod
+    def _positive_obs(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("min_common_obs must be positive")
+        return v
 
     @field_validator("coint_pvalue", "adf_pvalue")
     @classmethod
@@ -160,6 +186,15 @@ class SignalConfig(BaseModel):
     stop_z: float = 4.0
     timeout_half_life_mult: float = 3.0
     slippage_multiplier: float = 0.5
+    adaptive_vol: bool = False
+    adaptive_vol_window: int = 20
+
+    @field_validator("adaptive_vol_window")
+    @classmethod
+    def _min_vol_window(cls, v: int) -> int:
+        if v < 2:
+            raise ValueError("adaptive_vol_window must be >= 2")
+        return v
 
     @field_validator(
         "entry_z", "exit_z", "stop_z",
@@ -229,6 +264,8 @@ class RiskConfig(BaseModel):
     max_sector_pct: float = 0.30
     max_drawdown_pct: float = 0.10
     min_edge_over_slippage: float = 0.0
+    structural_break_window: int = 60
+    structural_break_pvalue: float = 0.10
 
     @field_validator("max_sector_pct", "max_drawdown_pct")
     @classmethod

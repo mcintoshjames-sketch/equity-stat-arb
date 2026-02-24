@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from stat_arb.engine.signals import SignalGenerator
     from stat_arb.engine.spread import SpreadComputer
     from stat_arb.engine.walk_forward import WalkForwardScheduler
+    from stat_arb.risk.risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,9 @@ class StatArbEngine:
         walk_forward: Window scheduler with discovery integration.
         pair_discovery: Pair discovery pipeline.
         universe: Tradable symbol universe.
+        risk_manager: Optional risk manager for external pipeline use.
+            Stored but not called by the engine — the caller pipeline
+            invokes it between ``step()`` and execution.
     """
 
     def __init__(
@@ -50,6 +54,7 @@ class StatArbEngine:
         walk_forward: WalkForwardScheduler,
         pair_discovery: PairDiscovery,
         universe: Universe,
+        risk_manager: RiskManager | None = None,
     ) -> None:
         self._signal_config = signal_config
         self._sizing_config = sizing_config
@@ -58,6 +63,7 @@ class StatArbEngine:
         self._wf = walk_forward
         self._discovery = pair_discovery
         self._universe = universe
+        self._risk_manager = risk_manager
         self._formation_done: set[tuple[date, date]] = set()
 
     def step(

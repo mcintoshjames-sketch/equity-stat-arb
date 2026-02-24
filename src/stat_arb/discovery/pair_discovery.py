@@ -80,7 +80,7 @@ class PairDiscovery:
 
             # Align on common dates
             common_idx = y_prices.index.intersection(x_prices.index)
-            if len(common_idx) < 60:
+            if len(common_idx) < self._config.min_common_obs:
                 continue
 
             y_aligned = y_prices.loc[common_idx]

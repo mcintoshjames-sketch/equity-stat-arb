@@ -86,6 +86,7 @@ discovery:
   min_correlation: 0.78
   parallel_n_jobs: -1
   use_ols_fallback: true
+  min_common_obs: 60
 
 signal:
   entry_z: 2.0
@@ -93,6 +94,8 @@ signal:
   stop_z: 4.0
   timeout_half_life_mult: 3.0
   slippage_multiplier: 0.5
+  adaptive_vol: false
+  adaptive_vol_window: 20
 
 sizing:
   dollars_per_leg: 1500.0

@@ -7,6 +7,8 @@ quotes, and estimates quote-width-based round-trip transaction costs.
 from __future__ import annotations
 
 import logging
+import math
+from collections import deque
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -35,6 +37,7 @@ class SpreadComputer:
     ) -> None:
         self._signal_config = signal_config
         self._sizing_config = sizing_config
+        self._spread_history: dict[tuple[str, str], deque[float]] = {}
 
     def compute_z_score(
         self,
@@ -57,14 +60,38 @@ class SpreadComputer:
         price_x = current_prices[pair.symbol_x]
 
         spread = price_y - pair.hedge_ratio * price_x - pair.intercept
-        z_score = (spread - pair.spread_mean) / pair.spread_std
+
+        # Adaptive volatility: use rolling σ when enabled and warmed up
+        sigma = pair.spread_std
+        cfg = self._signal_config
+        if cfg.adaptive_vol:
+            key = (pair.symbol_y, pair.symbol_x)
+            if key not in self._spread_history:
+                self._spread_history[key] = deque(
+                    maxlen=cfg.adaptive_vol_window,
+                )
+            self._spread_history[key].append(spread)
+
+            if len(self._spread_history[key]) >= cfg.adaptive_vol_window:
+                vals = list(self._spread_history[key])
+                mean = sum(vals) / len(vals)
+                variance = sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)
+                rolling_std = math.sqrt(variance)
+                # Floor at 50% of formation σ to prevent Z-score explosion
+                sigma = max(rolling_std, pair.spread_std * 0.5)
+
+        z_score = (spread - pair.spread_mean) / sigma
 
         logger.debug(
             "%s/%s spread=%.4f z=%.3f (μ=%.4f σ=%.4f)",
             pair.symbol_y, pair.symbol_x,
-            spread, z_score, pair.spread_mean, pair.spread_std,
+            spread, z_score, pair.spread_mean, sigma,
         )
         return z_score
+
+    def reset_spread_history(self) -> None:
+        """Clear all per-pair spread history (call on window rollover)."""
+        self._spread_history.clear()
 
     def estimate_round_trip_cost(
         self,

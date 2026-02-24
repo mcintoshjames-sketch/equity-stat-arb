@@ -56,3 +56,28 @@ class PositionDirection(StrEnum):
     LONG = "long"    # long spread: long Y, short X
     SHORT = "short"  # short spread: short Y, long X
     FLAT = "flat"    # no open position
+
+
+class RiskDecisionType(StrEnum):
+    """Outcome of a risk check on a proposed trade."""
+
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class ExitReason(StrEnum):
+    """Reason a pair position was closed."""
+
+    MEAN_REVERSION = "mean_reversion"
+    STOP_LOSS = "stop_loss"
+    TIMEOUT = "timeout"
+    STRUCTURAL_BREAK = "structural_break"
+    KILL_SWITCH = "kill_switch"
+
+
+class AlertSeverity(StrEnum):
+    """Severity level for monitoring alerts."""
+
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
