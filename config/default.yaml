@@ -1,0 +1,119 @@
+schwab:
+  app_key: "YOUR_APP_KEY"
+  app_secret: "YOUR_APP_SECRET"
+  callback_url: "https://127.0.0.1"
+  tokens_db: "~/.schwabdev/tokens.db"
+  account_hash: null
+
+universe:
+  min_price: 10.0
+  min_avg_volume: 500000
+  sectors:
+    technology:
+      - AAPL
+      - MSFT
+      - GOOG
+      - META
+      - NVDA
+      - AMD
+      - INTC
+      - CRM
+      - ADBE
+      - ORCL
+    financials:
+      - JPM
+      - BAC
+      - GS
+      - MS
+      - WFC
+      - C
+      - BLK
+      - SCHW
+      - AXP
+      - USB
+    healthcare:
+      - JNJ
+      - UNH
+      - PFE
+      - ABBV
+      - MRK
+      - TMO
+      - ABT
+      - LLY
+      - BMY
+      - AMGN
+    energy:
+      - XOM
+      - CVX
+      - COP
+      - SLB
+      - EOG
+      - PXD
+      - MPC
+      - VLO
+      - PSX
+      - OXY
+    consumer_discretionary:
+      - AMZN
+      - TSLA
+      - HD
+      - MCD
+      - NKE
+      - SBUX
+      - LOW
+      - TJX
+      - BKNG
+      - CMG
+    industrials:
+      - CAT
+      - DE
+      - UNP
+      - HON
+      - UPS
+      - BA
+      - RTX
+      - LMT
+      - GE
+      - MMM
+
+discovery:
+  formation_days: 252
+  coint_pvalue: 0.05
+  adf_pvalue: 0.05
+  min_half_life_days: 5
+  max_half_life_days: 30
+  max_hurst: 0.5
+  min_correlation: 0.78
+  parallel_n_jobs: -1
+
+signal:
+  entry_z: 2.0
+  exit_z: 0.5
+  stop_z: 4.0
+  timeout_half_life_mult: 3.0
+
+sizing:
+  dollars_per_leg: 1500.0
+  max_gross_per_pair: 3000.0
+
+risk:
+  max_pairs: 10
+  max_gross_exposure: 25000.0
+  max_sector_pct: 0.30
+  max_drawdown_pct: 0.10
+  min_edge_over_slippage: 0.0
+
+walk_forward:
+  formation_days: 252
+  trading_days: 63
+
+database:
+  url: "sqlite:///stat_arb.db"
+  echo: false
+
+logging:
+  level: "INFO"
+  json_format: true
+  log_file: null
+
+broker_mode: "paper"

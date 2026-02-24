@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets & tokens
+.env
+*.env
+tokens.db
+*.db
+!*.db-journal
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing & coverage
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Docker
+docker/.env
+
+# Project-specific
+output/
+reports/
+*.sqlite
