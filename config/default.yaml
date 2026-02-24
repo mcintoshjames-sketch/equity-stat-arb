@@ -7,7 +7,7 @@ schwab:
 
 universe:
   min_price: 10.0
-  min_avg_volume: 500000
+  min_avg_volume: 1000000
   sectors:
     technology:
       - AAPL

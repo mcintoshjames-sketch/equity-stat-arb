@@ -66,7 +66,7 @@ class UniverseConfig(BaseModel):
 
     sectors: dict[str, list[str]]
     min_price: float = 10.0
-    min_avg_volume: int = 500_000
+    min_avg_volume: int = 1_000_000
 
     @field_validator("min_price")
     @classmethod

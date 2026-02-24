@@ -49,7 +49,7 @@ def universe_config():
             "financials": ["JPM", "BAC", "GS"],
         },
         min_price=10.0,
-        min_avg_volume=500_000,
+        min_avg_volume=1_000_000,
     )
 
 
