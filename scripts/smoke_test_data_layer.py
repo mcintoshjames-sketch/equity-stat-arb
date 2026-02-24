@@ -33,7 +33,9 @@ def main() -> None:
     from stat_arb.data.schwab_client import SchwabDataClient
     from stat_arb.logging_config import setup_logging
 
-    config_path = Path(__file__).parent.parent / "config" / "default.yaml"
+    config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else (
+        Path(__file__).parent.parent / "config" / "default.yaml"
+    )
     print(f"Loading config from: {config_path}")
     cfg = load_config(config_path)
     setup_logging(cfg.logging)
