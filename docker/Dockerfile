@@ -6,11 +6,12 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
-# Install build dependencies
+# Install build backend + project
 COPY pyproject.toml ./
 COPY src/ src/
 
-RUN pip install --no-cache-dir --prefix=/install .
+RUN pip install --no-cache-dir hatchling && \
+    pip install --no-cache-dir --prefix=/install .
 
 
 # --- Stage 2: Runtime ---
