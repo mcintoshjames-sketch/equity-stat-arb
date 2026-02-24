@@ -49,56 +49,37 @@ class QualifiedPair:
 
 
 def _estimate_hurst(series: np.ndarray) -> float:
-    """Estimate the Hurst exponent via the rescaled range (R/S) method.
+    """Estimate the Hurst exponent from variance scaling of spread levels.
 
-    Applied to the first differences of the spread so that
-    H < 0.5 = mean-reverting (anti-persistent increments),
-    H > 0.5 = trending (persistent increments).
+    Uses the variance-ratio method: ``Var(X_{t+tau} - X_t) ~ tau^{2H}``.
+    For a mean-reverting spread the variance saturates at large lags,
+    giving H < 0.5.  For a random walk H ~ 0.5; for a trending spread
+    H > 0.5.
 
     Args:
-        series: 1-D array of spread values.
+        series: 1-D array of spread level values.
 
     Returns:
         Hurst exponent.  H < 0.5 = mean-reverting, H > 0.5 = trending.
     """
-    # R/S on first differences to measure persistence of increments
-    diffs = np.diff(series)
-    n = len(diffs)
-    if n < 20:
+    n = len(series)
+    if n < 100:
         return 0.5  # insufficient data
 
-    max_k = min(n // 2, 100)
-    sizes = []
-    rs_values = []
+    max_lag = min(n // 4, 100)
+    lags = list(range(2, max_lag + 1))
+    variances = []
 
-    for size in range(10, max_k + 1):
-        num_chunks = n // size
-        if num_chunks < 1:
-            continue
+    for lag in lags:
+        diffs = series[lag:] - series[:-lag]
+        variances.append(np.var(diffs))
 
-        rs_list = []
-        for i in range(num_chunks):
-            chunk = diffs[i * size : (i + 1) * size]
-            mean = np.mean(chunk)
-            devs = np.cumsum(chunk - mean)
-            r = np.max(devs) - np.min(devs)
-            s = np.std(chunk, ddof=1)
-            if s > 0:
-                rs_list.append(r / s)
+    log_lags = np.log(lags)
+    log_vars = np.log(variances)
 
-        if rs_list:
-            sizes.append(size)
-            rs_values.append(np.mean(rs_list))
-
-    if len(sizes) < 2:
-        return 0.5
-
-    log_sizes = np.log(sizes)
-    log_rs = np.log(rs_values)
-
-    # OLS: log(R/S) = H * log(n) + c
-    coeffs = np.polyfit(log_sizes, log_rs, 1)
-    return float(coeffs[0])
+    # log(Var) = 2H * log(tau) + c  →  slope / 2 = H
+    coeffs = np.polyfit(log_lags, log_vars, 1)
+    return float(coeffs[0] / 2.0)
 
 
 class PairFilter:
@@ -111,7 +92,7 @@ class PairFilter:
     def __init__(self, config: DiscoveryConfig) -> None:
         self._config = config
         self._coint_tester = CointegrationTester(config)
-        self._hedge_estimator = HedgeRatioEstimator()
+        self._hedge_estimator = HedgeRatioEstimator(config)
 
     def evaluate(
         self,
@@ -137,13 +118,22 @@ class PairFilter:
         Returns:
             ``QualifiedPair`` if all gates pass, ``None`` otherwise.
         """
-        # Gate 1: Cointegration test
+        # Gate 1: Dual Engle-Granger cointegration test (both directions)
         coint_result = self._coint_tester.test_pair(y_prices, x_prices)
         if coint_result is None:
             return None
 
+        # If reverse direction had stronger ADF, swap legs
+        if coint_result.swapped:
+            symbol_y, symbol_x = symbol_x, symbol_y
+            y_prices, x_prices = x_prices, y_prices
+
         # Gate 2: Hedge ratio estimation (Kalman → OLS fallback)
-        hr_result = self._hedge_estimator.estimate(y_prices, x_prices)
+        hr_result = self._hedge_estimator.estimate(
+            y_prices, x_prices, symbol_y, symbol_x,
+        )
+        if hr_result is None:
+            return None
 
         # Gate 3: Compute spread and OU half-life
         spread = y_prices.values - hr_result.beta * x_prices.values - hr_result.intercept

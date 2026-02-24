@@ -85,6 +85,7 @@ discovery:
   max_hurst: 0.5
   min_correlation: 0.78
   parallel_n_jobs: -1
+  use_ols_fallback: true
 
 signal:
   entry_z: 2.0

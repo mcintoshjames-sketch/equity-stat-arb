@@ -105,6 +105,7 @@ class DiscoveryConfig(BaseModel):
     max_hurst: float = 0.5
     min_correlation: float = 0.78
     parallel_n_jobs: int = -1
+    use_ols_fallback: bool = True
 
     @field_validator("coint_pvalue", "adf_pvalue")
     @classmethod

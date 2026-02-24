@@ -2,16 +2,20 @@
 
 Primary estimator uses ``pykalman.KalmanFilter`` to track time-varying
 beta and intercept.  Falls back to rolling OLS when Kalman EM fails to
-converge.
+converge (configurable via ``DiscoveryConfig.use_ols_fallback``).
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from stat_arb.config.settings import DiscoveryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -28,25 +32,53 @@ class HedgeRatioResult:
 
 
 class HedgeRatioEstimator:
-    """Estimate time-varying hedge ratio between two price series."""
+    """Estimate time-varying hedge ratio between two price series.
 
-    def estimate(self, y: pd.Series, x: pd.Series) -> HedgeRatioResult:
-        """Estimate hedge ratio using Kalman filter, falling back to rolling OLS.
+    Args:
+        config: Discovery configuration (controls OLS fallback behaviour).
+    """
+
+    def __init__(self, config: DiscoveryConfig) -> None:
+        self._config = config
+
+    def estimate(
+        self,
+        y: pd.Series,
+        x: pd.Series,
+        symbol_y: str = "?",
+        symbol_x: str = "?",
+    ) -> HedgeRatioResult | None:
+        """Estimate hedge ratio using Kalman filter, optionally falling back to OLS.
 
         Args:
             y: Dependent (Y-leg) close prices.
             x: Independent (X-leg) close prices.
+            symbol_y: Y-leg ticker (for log messages).
+            symbol_x: X-leg ticker (for log messages).
 
         Returns:
-            ``HedgeRatioResult`` with final beta, intercept, and full beta series.
+            ``HedgeRatioResult``, or ``None`` if Kalman fails and
+            fallback is disabled.
         """
         try:
             return self._kalman_estimate(y, x)
         except Exception:
-            logger.warning("Kalman EM failed to converge — falling back to rolling OLS")
+            if not self._config.use_ols_fallback:
+                logger.warning(
+                    "Kalman EM failed for %s/%s — OLS fallback disabled, skipping",
+                    symbol_y, symbol_x,
+                )
+                return None
+            logger.warning(
+                "Kalman EM failed to converge for %s/%s"
+                " — falling back to rolling OLS",
+                symbol_y, symbol_x,
+            )
             return self._rolling_ols_estimate(y, x)
 
-    def _kalman_estimate(self, y: pd.Series, x: pd.Series) -> HedgeRatioResult:
+    def _kalman_estimate(
+        self, y: pd.Series, x: pd.Series,
+    ) -> HedgeRatioResult:
         """Kalman filter estimation of time-varying hedge ratio."""
         from pykalman import KalmanFilter
 
@@ -79,7 +111,9 @@ class HedgeRatioEstimator:
             beta_series=beta_series,
         )
 
-    def _rolling_ols_estimate(self, y: pd.Series, x: pd.Series) -> HedgeRatioResult:
+    def _rolling_ols_estimate(
+        self, y: pd.Series, x: pd.Series,
+    ) -> HedgeRatioResult:
         """Rolling OLS fallback with 60-day window."""
         n = len(y)
         beta_series = np.full(n, np.nan)
