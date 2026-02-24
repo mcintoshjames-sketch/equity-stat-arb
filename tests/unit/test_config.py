@@ -4,15 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from stat_arb.config.constants import BrokerMode, Signal, OrderSide, WindowPhase, PairStatus
+from stat_arb.config.constants import BrokerMode, OrderSide, Signal
 from stat_arb.config.settings import (
     AppConfig,
-    DatabaseConfig,
     DiscoveryConfig,
-    LoggingConfig,
     SchwabConfig,
-    SignalConfig,
-    UniverseConfig,
     load_config,
 )
 

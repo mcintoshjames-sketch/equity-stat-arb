@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -13,15 +12,13 @@ from stat_arb.config.settings import (
     AppConfig,
     DatabaseConfig,
     DiscoveryConfig,
-    LoggingConfig,
     RiskConfig,
     SchwabConfig,
     SignalConfig,
     SizingConfig,
     UniverseConfig,
-    WalkForwardConfig,
 )
-from stat_arb.data.db import init_db, create_tables, get_session
+from stat_arb.data.db import create_tables, get_session, init_db
 
 
 @pytest.fixture

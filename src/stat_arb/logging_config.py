@@ -1,4 +1,9 @@
-"""Structured JSON logging configuration."""
+"""Structured JSON logging configuration.
+
+Provides a ``JSONFormatter`` that emits one-line JSON records suitable for
+log aggregation (ELK, CloudWatch, etc.) and a ``setup_logging`` helper
+that wires up console + optional file output from ``LoggingConfig``.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +17,11 @@ if TYPE_CHECKING:
 
 
 class JSONFormatter(logging.Formatter):
-    """Emit log records as single-line JSON."""
+    """Emit each log record as a single-line JSON object.
+
+    Fields: ``ts``, ``level``, ``logger``, ``msg``, and optionally ``exc``
+    when an exception is attached to the record.
+    """
 
     def format(self, record: logging.LogRecord) -> str:
         log_entry = {
@@ -27,7 +36,13 @@ class JSONFormatter(logging.Formatter):
 
 
 def setup_logging(config: LoggingConfig) -> None:
-    """Configure root logger from LoggingConfig."""
+    """Configure the root logger from a ``LoggingConfig`` instance.
+
+    * Clears existing handlers to allow re-initialisation.
+    * Uses ``JSONFormatter`` when ``config.json_format`` is True.
+    * Adds a ``FileHandler`` when ``config.log_file`` is set.
+    * Silences noisy third-party loggers (urllib3, schwabdev).
+    """
     root = logging.getLogger()
     root.setLevel(config.level.upper())
 
@@ -35,7 +50,7 @@ def setup_logging(config: LoggingConfig) -> None:
     root.handlers.clear()
 
     if config.json_format:
-        formatter = JSONFormatter()
+        formatter: logging.Formatter = JSONFormatter()
     else:
         formatter = logging.Formatter(
             "%(asctime)s %(levelname)-8s %(name)s — %(message)s",

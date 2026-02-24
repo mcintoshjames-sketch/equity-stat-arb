@@ -3,11 +3,10 @@
 from datetime import date
 
 import pandas as pd
-import numpy as np
 
 from stat_arb.data.db import get_session
-from stat_arb.data.schemas import DailyPrice
 from stat_arb.data.price_repo import PriceRepository
+from stat_arb.data.schemas import DailyPrice
 
 
 class TestDatabase:
