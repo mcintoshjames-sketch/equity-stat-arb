@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_BASE_URL = "https://financialmodelingprep.com/api/v3"
+_BASE_URL = "https://financialmodelingprep.com/stable"
 _FETCH_HORIZON_DAYS = 45  # fetch this many calendar days ahead of as_of
 
 # ---------------------------------------------------------------------------
@@ -193,7 +193,7 @@ class FmpClient:
     @_api_retry
     def _fetch_earnings(self, start: date, end: date) -> list[dict[str, str]]:
         """Fetch earnings calendar from FMP API."""
-        endpoint = "earning_calendar"
+        endpoint = "earnings-calendar"
         url = f"{_BASE_URL}/{endpoint}"
         params = {
             "from": start.isoformat(),
