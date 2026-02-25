@@ -20,6 +20,10 @@ case "${1:-run-live}" in
         fi
         exec python -m stat_arb run-live --config "$CONFIG" $BROKER_FLAG $LOOP_FLAG "$@"
         ;;
+    dashboard)
+        shift || true
+        exec python -m stat_arb dashboard --config "$CONFIG" "$@"
+        ;;
     *)
         exec "$@"
         ;;

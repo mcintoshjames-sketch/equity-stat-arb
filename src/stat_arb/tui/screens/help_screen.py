@@ -154,7 +154,8 @@ _HELP_TEXT = """\
     To resume trading, restart the engine process.
 
   [b]Restarting the engine[/b]
-    If the engine has crashed or was killed:
+    Press [b]s[/b] on the dashboard to start the engine as a background
+    process.  Alternatively, from a terminal:
       [b]stat-arb run-live --loop[/b]              (paper mode)
       [b]stat-arb run-live --loop --broker-mode=live[/b]  (live mode)
 
@@ -170,6 +171,7 @@ _HELP_TEXT = """\
   [b]3[/b]  Token management screen
   [b]?[/b]  This help screen
   [b]r[/b]  Refresh current screen data
+  [b]s[/b]  Start engine (spawns background process)
   [b]9[/b]  Kill switch (sends command to engine via DB)
   [b]q[/b]  Quit dashboard (engine continues running)
 

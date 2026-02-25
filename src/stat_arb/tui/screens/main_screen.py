@@ -5,6 +5,9 @@ Engine state is derived entirely from DB polling — no in-process runner refere
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from os import devnull
 from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
@@ -30,6 +33,7 @@ class MainScreen(Screen):
 
     BINDINGS = [
         ("r", "refresh_data", "Refresh"),
+        ("s", "start_engine", "Start Engine"),
         ("9", "emergency_stop", "Kill Switch"),
     ]
 
@@ -37,13 +41,16 @@ class MainScreen(Screen):
         self,
         provider: DashboardDataProvider,
         broker_mode_str: str = "paper",
+        config_path: str = "config/default.yaml",
     ) -> None:
         super().__init__()
         self._provider = provider
         self._broker_mode_str = broker_mode_str
+        self._config_path = config_path
         self._last_event_id: int | None = None
         self._engine_alive = False
         self._engine_state = "not detected"
+        self._engine_pid: int | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="top-row"):
@@ -83,6 +90,44 @@ class MainScreen(Screen):
 
     def action_refresh_data(self) -> None:
         self._refresh_all()
+
+    # ------------------------------------------------------------------
+    # Start engine
+    # ------------------------------------------------------------------
+
+    def action_start_engine(self) -> None:
+        """Spawn the engine as a detached background process."""
+        feed = self.query_one(ActivityFeed)
+
+        if self._engine_alive:
+            feed.add_event("Engine is already running", "warning")
+            return
+
+        if self._engine_pid is not None:
+            feed.add_event(
+                f"Engine already started (PID: {self._engine_pid}), waiting for heartbeat...",
+                "warning",
+            )
+            return
+
+        cmd = [
+            sys.executable, "-m", "stat_arb",
+            "run-live", "--loop", "--config", self._config_path,
+        ]
+        try:
+            with open(devnull, "w") as dn:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=dn,
+                    stderr=dn,
+                    start_new_session=True,
+                )
+            self._engine_pid = proc.pid
+            feed.add_event(
+                f"Engine started (PID: {proc.pid})", "info",
+            )
+        except Exception as exc:
+            feed.add_event(f"Failed to start engine: {exc}", "error")
 
     # ------------------------------------------------------------------
     # Kill switch flow
@@ -149,6 +194,8 @@ class MainScreen(Screen):
             status = self._provider.get_engine_status()
             self._engine_alive = status.is_alive
             self._engine_state = status.state if status.is_alive else "not detected"
+            if status.is_alive:
+                self._engine_pid = None  # clear startup guard
             self.query_one("#engine-bar", Static).update(self._engine_bar_text())
             self.query_one(SystemStatusWidget).set_engine_state(self._engine_state)
 
@@ -180,8 +227,12 @@ class MainScreen(Screen):
         else:
             mode_markup = mode
 
+        state_text = self._engine_state
+        if not self._engine_alive:
+            state_text += " [dim](press s to start)[/dim]"
+
         return (
-            f"[b]Engine:[/b] {self._engine_state} | "
+            f"[b]Engine:[/b] {state_text} | "
             f"[b]Mode:[/b] {mode_markup}"
         )
 

@@ -407,5 +407,6 @@ def dashboard(config_path: str, broker_override: str | None) -> None:
         callback_url=callback_url,
         app_key=app_key,
         broker_mode_str=broker_mode.value,
+        config_path=config_path,
     )
     app.run()

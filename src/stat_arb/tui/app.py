@@ -47,6 +47,7 @@ class StatArbDashboard(App):
         callback_url: str = "https://127.0.0.1",
         app_key: str = "",
         broker_mode_str: str = "paper",
+        config_path: str = "config/default.yaml",
     ) -> None:
         super().__init__()
         self._provider = provider
@@ -54,12 +55,14 @@ class StatArbDashboard(App):
         self._callback_url = callback_url
         self._app_key = app_key
         self._broker_mode_str = broker_mode_str
+        self._config_path = config_path
 
     def on_mount(self) -> None:
         self.install_screen(
             MainScreen(
                 self._provider,
                 broker_mode_str=self._broker_mode_str,
+                config_path=self._config_path,
             ),
             name="main",
         )

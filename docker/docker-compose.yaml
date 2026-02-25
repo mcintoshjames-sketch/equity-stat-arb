@@ -16,6 +16,7 @@ services:
       - LOOP=false
       - SCHWAB_APP_KEY=${SCHWAB_APP_KEY}
       - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET}
+      - FMP_API_KEY=${FMP_API_KEY:-}
     volumes:
       - stat-arb-data:/data
     restart: "no"
@@ -31,6 +32,7 @@ services:
       - LOOP=true
       - SCHWAB_APP_KEY=${SCHWAB_APP_KEY}
       - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET}
+      - FMP_API_KEY=${FMP_API_KEY:-}
     volumes:
       - stat-arb-data:/data
     restart: unless-stopped
@@ -45,9 +47,27 @@ services:
     environment:
       - SCHWAB_APP_KEY=${SCHWAB_APP_KEY}
       - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET}
+      - FMP_API_KEY=${FMP_API_KEY:-}
     volumes:
       - stat-arb-data:/data
     profiles: ["backtest"]
+
+  # --- TUI dashboard (ad-hoc, interactive) ---
+  dashboard:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["dashboard"]
+    environment:
+      - BROKER_MODE=paper
+      - SCHWAB_APP_KEY=${SCHWAB_APP_KEY}
+      - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET}
+      - FMP_API_KEY=${FMP_API_KEY:-}
+    volumes:
+      - stat-arb-data:/data
+    profiles: ["dashboard"]
+    stdin_open: true
+    tty: true
 
 volumes:
   stat-arb-data:
