@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -24,12 +25,14 @@ from stat_arb.config.constants import (
     RebalanceAction,
     Signal,
 )
+from stat_arb.engine.signals import SignalEvent
 from stat_arb.execution.order_builder import build_orders
 from stat_arb.execution.rebalancer import (
     InventoryRebalancer,
     OpenPositionView,
     RebalanceResult,
 )
+from stat_arb.execution.sizing import SizeResult
 
 if TYPE_CHECKING:
     from stat_arb.backtest.sim_broker import SimBroker
@@ -39,6 +42,7 @@ if TYPE_CHECKING:
     from stat_arb.engine.stat_arb_engine import StatArbEngine
     from stat_arb.execution.sizing import PositionSizer
     from stat_arb.risk.risk_manager import RiskManager
+    from stat_arb.risk.structural_break import StructuralBreakMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +70,7 @@ class WalkForwardBacktest:
         sizer: PositionSizer,
         sim_broker: SimBroker,
         universe: Universe,
+        structural_break: StructuralBreakMonitor | None = None,
     ) -> None:
         self._engine = engine
         self._price_repo = price_repo
@@ -74,6 +79,7 @@ class WalkForwardBacktest:
         self._broker = sim_broker
         self._universe = universe
         self._rebalancer = InventoryRebalancer(sizer._config)
+        self._structural_break = structural_break
 
     def run(self, start_date: date, end_date: date) -> BacktestResult:
         """Execute the walk-forward backtest.
@@ -186,7 +192,8 @@ class WalkForwardBacktest:
 
                     fill_prices: dict[str, float] = {}
                     for fill in fills:
-                        fill_prices[fill.symbol] = fill.price
+                        if fill.price > 0:
+                            fill_prices[fill.symbol] = fill.price
 
                     direction = (
                         PositionDirection.LONG
@@ -244,6 +251,58 @@ class WalkForwardBacktest:
                         + abs(pos.signed_qty_x) * (p_x - pos.entry_price_x)
                     )
                 self._risk.update_pair_pnl(pos.pair_id, pnl)
+
+            # Check per-pair PnL stops
+            breached_keys = [
+                key for key, pos in active_positions.items()
+                if self._risk.check_pair_pnl_stop(pos.pair_id)
+            ]
+            for pair_key in breached_keys:
+                pos = active_positions.pop(pair_key)
+                size = SizeResult(
+                    qty_y=abs(pos.signed_qty_y),
+                    qty_x=abs(pos.signed_qty_x),
+                    notional_y=0.0, notional_x=0.0,
+                )
+                stop_event = SignalEvent(
+                    signal=Signal.STOP,
+                    pair=SimpleNamespace(
+                        symbol_y=pos.symbol_y, symbol_x=pos.symbol_x,
+                    ),  # type: ignore[arg-type]
+                    z_score=0.0,
+                    estimated_round_trip_cost=0.0,
+                )
+                orders = build_orders(
+                    stop_event, size, pos.pair_id, direction=pos.direction,
+                )
+                fills = self._broker.submit_orders(orders)
+                pnl = sum(
+                    (-f.price * f.quantity if f.side.value == "BUY"
+                     else f.price * f.quantity)
+                    for f in fills
+                )
+                trade = TradeRecord(
+                    pair_key=pair_key,
+                    signal=(
+                        Signal.LONG_SPREAD
+                        if pos.direction == PositionDirection.LONG
+                        else Signal.SHORT_SPREAD
+                    ),
+                    entry_date=pos.entry_date,
+                    exit_date=current_date,
+                    entry_z=pos.entry_z,
+                    exit_z=0.0,
+                    pnl=pnl,
+                    exit_reason=ExitReason.STOP_LOSS,
+                )
+                result.trades.append(trade)
+                self._risk.unregister_pair(pos.pair_id)
+                logger.info("PNL STOP %s (pair_id=%d)", pair_key, pos.pair_id)
+
+            # Check structural breaks
+            self._check_structural_breaks(
+                active_positions, prices, current_date, result,
+            )
 
             # Record equity point
             portfolio_value = self._broker.get_portfolio_value()
@@ -376,15 +435,13 @@ class WalkForwardBacktest:
         result: BacktestResult,
     ) -> None:
         """Close a position and record the trade."""
-        from stat_arb.execution.sizing import SizeResult
-
         size = SizeResult(
             qty_y=abs(pos.signed_qty_y),
             qty_x=abs(pos.signed_qty_x),
             notional_y=0.0,
             notional_x=0.0,
         )
-        orders = build_orders(event, size, pos.pair_id)
+        orders = build_orders(event, size, pos.pair_id, direction=pos.direction)
         fills = self._broker.submit_orders(orders)
 
         pnl = sum(
@@ -418,6 +475,92 @@ class WalkForwardBacktest:
         )
         result.trades.append(trade)
         self._risk.unregister_pair(pos.pair_id)
+
+    def _check_structural_breaks(
+        self,
+        active_positions: dict[str, _OpenPosition],
+        prices: dict[str, float],
+        current_date: date,
+        result: BacktestResult,
+    ) -> None:
+        """Force-exit positions whose spread has structurally broken."""
+        if self._structural_break is None:
+            return
+
+        import numpy as np
+
+        window = self._structural_break._window
+        from datetime import timedelta
+
+        start = current_date - timedelta(days=int(window * 2))
+
+        breached_keys: list[str] = []
+        for pair_key, pos in active_positions.items():
+            df = self._price_repo.get_close_prices(
+                [pos.symbol_y, pos.symbol_x], start, current_date,
+            )
+            if df.empty or pos.symbol_y not in df.columns or pos.symbol_x not in df.columns:
+                continue
+            prices_y = df[pos.symbol_y].dropna().values.astype(np.float64)
+            prices_x = df[pos.symbol_x].dropna().values.astype(np.float64)
+
+            qp = None
+            for p in self._engine._wf.active_pairs:
+                if p.symbol_y == pos.symbol_y and p.symbol_x == pos.symbol_x:
+                    qp = p
+                    break
+            if qp is None and hasattr(self._engine, "_rolling") and self._engine._rolling:
+                for p in self._engine._rolling.active_pairs:
+                    if p.symbol_y == pos.symbol_y and p.symbol_x == pos.symbol_x:
+                        qp = p
+                        break
+            if qp is None:
+                continue
+
+            if self._structural_break.check_pair(qp, prices_y, prices_x):
+                breached_keys.append(pair_key)
+
+        for pair_key in breached_keys:
+            pos = active_positions.pop(pair_key)
+            size = SizeResult(
+                qty_y=abs(pos.signed_qty_y),
+                qty_x=abs(pos.signed_qty_x),
+                notional_y=0.0, notional_x=0.0,
+            )
+            stop_event = SignalEvent(
+                signal=Signal.STOP,
+                pair=SimpleNamespace(
+                    symbol_y=pos.symbol_y, symbol_x=pos.symbol_x,
+                ),  # type: ignore[arg-type]
+                z_score=0.0,
+                estimated_round_trip_cost=0.0,
+            )
+            orders = build_orders(
+                stop_event, size, pos.pair_id, direction=pos.direction,
+            )
+            fills = self._broker.submit_orders(orders)
+            pnl = sum(
+                (-f.price * f.quantity if f.side.value == "BUY"
+                 else f.price * f.quantity)
+                for f in fills
+            )
+            trade = TradeRecord(
+                pair_key=pair_key,
+                signal=(
+                    Signal.LONG_SPREAD
+                    if pos.direction == PositionDirection.LONG
+                    else Signal.SHORT_SPREAD
+                ),
+                entry_date=pos.entry_date,
+                exit_date=current_date,
+                entry_z=pos.entry_z,
+                exit_z=0.0,
+                pnl=pnl,
+                exit_reason=ExitReason.STRUCTURAL_BREAK,
+            )
+            result.trades.append(trade)
+            self._risk.unregister_pair(pos.pair_id)
+            logger.info("STRUCTURAL BREAK %s (pair_id=%d)", pair_key, pos.pair_id)
 
     def _get_prices(self, current_date: date) -> dict[str, float]:
         """Fetch close prices for the universe on a given date."""

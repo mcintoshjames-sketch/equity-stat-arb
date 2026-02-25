@@ -41,7 +41,7 @@ def _build_core(cfg, *, use_rolling: bool = True):
 
     Returns:
         (engine, walk_forward, sizer, risk_manager, price_repo, universe,
-         schwab_client, rolling_scheduler)
+         schwab_client, rolling_scheduler, structural_break)
     """
     from stat_arb.data.db import create_tables, init_db
     from stat_arb.data.price_repo import PriceRepository
@@ -57,6 +57,7 @@ def _build_core(cfg, *, use_rolling: bool = True):
     from stat_arb.execution.sizing import PositionSizer
     from stat_arb.logging_config import setup_logging
     from stat_arb.risk.risk_manager import RiskManager
+    from stat_arb.risk.structural_break import StructuralBreakMonitor
 
     setup_logging(cfg.logging)
     init_db(cfg.database)
@@ -96,6 +97,7 @@ def _build_core(cfg, *, use_rolling: bool = True):
         click.echo("FMP_API_KEY not set — earnings blackout disabled.")
 
     risk_manager = RiskManager(cfg.risk, earnings_blackout=earnings_blackout)
+    structural_break = StructuralBreakMonitor(cfg.risk)
 
     rolling_scheduler: RollingScheduler | None = None
     if use_rolling:
@@ -123,6 +125,7 @@ def _build_core(cfg, *, use_rolling: bool = True):
     return (
         engine, walk_forward, sizer, risk_manager,
         price_repo, universe, schwab_client, rolling_scheduler,
+        structural_break,
     )
 
 
@@ -179,7 +182,7 @@ def run_backtest(
 
     use_rolling = not use_walk_forward
     cfg = load_config(config_path)
-    engine, walk_forward, sizer, risk_manager, price_repo, universe, _, rolling = (
+    engine, walk_forward, sizer, risk_manager, price_repo, universe, _, rolling, sb_monitor = (
         _build_core(cfg, use_rolling=use_rolling)
     )
 
@@ -208,6 +211,7 @@ def run_backtest(
         sizer=sizer,
         sim_broker=sim_broker,
         universe=universe,
+        structural_break=sb_monitor,
     )
 
     result = backtest.run(start_date, end_date)
@@ -306,9 +310,10 @@ def run_live(config_path: str, loop: bool, broker_override: str | None) -> None:
     from stat_arb.live.runner import LiveRunner
 
     cfg = load_config(config_path)
-    engine, walk_forward, sizer, risk_manager, price_repo, universe, schwab_client, rolling = (
-        _build_core(cfg, use_rolling=True)
-    )
+    (
+        engine, walk_forward, sizer, risk_manager,
+        price_repo, universe, schwab_client, rolling, sb_monitor,
+    ) = _build_core(cfg, use_rolling=True)
 
     # Generate walk-forward windows as fallback (rolling scheduler is primary)
     today = date.today()
@@ -337,6 +342,7 @@ def run_live(config_path: str, loop: bool, broker_override: str | None) -> None:
         schwab_client=schwab_client,
         broker_mode=broker_mode,
         signal_config=cfg.signal,
+        structural_break=sb_monitor,
     )
 
     if loop:

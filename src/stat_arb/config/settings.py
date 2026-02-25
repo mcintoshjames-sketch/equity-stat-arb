@@ -59,11 +59,14 @@ class SchwabBrokerConfig(BaseModel):
     Attributes:
         use_limit_orders: Use LIMIT orders instead of MARKET orders.
             Safer for pairs trading where fills at a known price matter.
+        limit_offset_bps: Basis points away from mid for limit price.
+            BUY → mid + offset, SELL → mid - offset.
     """
 
     model_config = _FROZEN
 
     use_limit_orders: bool = False
+    limit_offset_bps: float = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +275,7 @@ class RiskConfig(BaseModel):
     max_entries_per_step: int = 3
     per_pair_pnl_stop: float = -200.0
     max_cohort_concentration: int = 5
+    min_days_before_expiry: int = 5
 
     @field_validator("max_sector_pct", "max_drawdown_pct")
     @classmethod

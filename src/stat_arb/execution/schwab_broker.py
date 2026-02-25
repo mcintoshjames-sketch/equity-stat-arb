@@ -35,6 +35,7 @@ class LiveSchwabBroker(ExecutionBroker):
     ) -> None:
         self._client = client
         self._config = broker_config
+        self._quotes: dict[str, dict[str, float]] = {}
 
     def submit_orders(self, orders: list[Order]) -> list[Fill]:
         """Submit orders to Schwab and return fills.
@@ -69,6 +70,12 @@ class LiveSchwabBroker(ExecutionBroker):
             )
 
         return fills
+
+    def update_quotes(
+        self, quotes: dict[str, dict[str, float]],
+    ) -> None:
+        """Store latest quotes for limit price computation."""
+        self._quotes = quotes
 
     def get_portfolio_value(self) -> float:
         """Delegate to Schwab API account value."""
@@ -108,11 +115,12 @@ class LiveSchwabBroker(ExecutionBroker):
         }
 
         if self._config.use_limit_orders:
+            limit_price = self._compute_limit_price(order)
             return {
                 "orderType": "LIMIT",
                 "session": "NORMAL",
                 "duration": "DAY",
-                "price": "0.00",  # caller should set actual limit price
+                "price": f"{limit_price:.2f}",
                 "orderStrategyType": "SINGLE",
                 "orderLegCollection": [leg],
             }
@@ -124,3 +132,25 @@ class LiveSchwabBroker(ExecutionBroker):
             "orderStrategyType": "SINGLE",
             "orderLegCollection": [leg],
         }
+
+    def _compute_limit_price(self, order: Order) -> float:
+        """Compute limit price from quotes and offset_bps.
+
+        BUY: mid + offset (willing to pay slightly above mid).
+        SELL: mid - offset (willing to sell slightly below mid).
+        Falls back to order.limit_price or 0.01 if no quotes.
+        """
+        q = self._quotes.get(order.symbol)
+        if q is not None:
+            bid = q.get("bid", 0.0)
+            ask = q.get("ask", 0.0)
+            if bid > 0 and ask > 0:
+                mid = (bid + ask) / 2.0
+                offset = mid * self._config.limit_offset_bps / 10_000.0
+                if order.side == OrderSide.BUY:
+                    return round(mid + offset, 2)
+                return round(mid - offset, 2)
+
+        if order.limit_price is not None and order.limit_price > 0:
+            return order.limit_price
+        return 0.01

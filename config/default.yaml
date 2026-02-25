@@ -109,7 +109,20 @@ risk:
   max_gross_exposure: 25000.0
   max_sector_pct: 0.30
   max_drawdown_pct: 0.10
-  min_edge_over_slippage: 0.0
+  min_edge_over_slippage: 500.0
+  structural_break_window: 60
+  structural_break_pvalue: 0.10
+  max_entries_per_step: 3
+  per_pair_pnl_stop: -200.0
+  max_cohort_concentration: 5
+  min_days_before_expiry: 5
+
+# FMP (Financial Modeling Prep) — earnings blackout support
+# Set FMP_API_KEY env var or uncomment below to enable.
+# fmp:
+#   api_key: "YOUR_FMP_API_KEY"
+#   earnings_blackout_days: 3
+#   cache_dir: "~/.stat_arb"
 
 walk_forward:
   formation_days: 252

@@ -141,6 +141,23 @@ class RiskManager:
                     reason=f"cohort {cohort_id} at max concentration",
                 )
 
+        # 1d. Near-expiry guard
+        trading_expiry = getattr(event.pair, "trading_expiry", None)
+        if (
+            trading_expiry is not None
+            and current_date is not None
+            and self._config.min_days_before_expiry > 0
+        ):
+            days_left = (trading_expiry - current_date).days
+            if days_left < self._config.min_days_before_expiry:
+                return RiskDecision(
+                    decision=RiskDecisionType.REJECTED,
+                    reason=(
+                        f"only {days_left}d before expiry "
+                        f"(min {self._config.min_days_before_expiry}d)"
+                    ),
+                )
+
         # 2. Max pairs
         if active_pair_count >= self._config.max_pairs:
             return RiskDecision(

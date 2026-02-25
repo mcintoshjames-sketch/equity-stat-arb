@@ -113,3 +113,11 @@ class TestLiveRunner:
         quotes = {"AAA": {"bid": 100.0, "ask": 102.0}}
         assert LiveRunner._mid_price(quotes, "AAA") == pytest.approx(101.0)
         assert LiveRunner._mid_price(quotes, "ZZZ") is None
+
+    def test_structural_break_skipped_when_none(self) -> None:
+        """_check_structural_breaks is a no-op when no monitor is set."""
+        runner = _make_runner()
+        assert runner._structural_break is None
+        # Should not raise
+        from datetime import date as d
+        runner._check_structural_breaks(d.today())

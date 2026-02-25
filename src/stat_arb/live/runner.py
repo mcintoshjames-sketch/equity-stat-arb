@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from stat_arb.execution.broker_base import ExecutionBroker
     from stat_arb.execution.sizing import PositionSizer
     from stat_arb.risk.risk_manager import RiskManager
+    from stat_arb.risk.structural_break import StructuralBreakMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ class LiveRunner:
         schwab_client: SchwabDataClient | None,
         broker_mode: BrokerMode,
         signal_config: SignalConfig,
+        structural_break: StructuralBreakMonitor | None = None,
     ) -> None:
         self._engine = engine
         self._sizer = sizer
@@ -94,6 +96,7 @@ class LiveRunner:
         self._next_pair_id = 1
         self._shutdown = False
         self._last_heartbeat: float = 0.0
+        self._structural_break = structural_break
 
     def run_once(self) -> int:
         """Execute a single trading step for today.
@@ -127,6 +130,8 @@ class LiveRunner:
 
             self._risk.reset_step_counters()
             self._update_pair_metrics(quotes)
+            self._check_pnl_stops(quotes)
+            self._check_structural_breaks(today)
 
             # Refresh earnings blackout cache
             if self._risk._earnings is not None:
@@ -400,10 +405,11 @@ class LiveRunner:
         orders = build_orders(event, size, pair_id)
         fills = self._broker.submit_orders(orders)
 
-        # Extract per-leg fill prices
+        # Extract per-leg fill prices (skip zero/negative from Schwab)
         fill_prices: dict[str, float] = {}
         for fill in fills:
-            fill_prices[fill.symbol] = fill.price
+            if fill.price > 0:
+                fill_prices[fill.symbol] = fill.price
 
         direction = (
             PositionDirection.LONG
@@ -459,8 +465,10 @@ class LiveRunner:
 
         from stat_arb.execution.sizing import SizeResult
 
-        size = SizeResult(qty_y=0, qty_x=0, notional_y=0, notional_x=0)
-        orders = build_orders(event, size, pos.pair_id)
+        size = SizeResult(
+            qty_y=pos.qty_y, qty_x=pos.qty_x, notional_y=0, notional_x=0,
+        )
+        orders = build_orders(event, size, pos.pair_id, direction=pos.direction)
         self._broker.submit_orders(orders)
         self._risk.unregister_pair(pos.pair_id)
 
@@ -542,6 +550,124 @@ class LiveRunner:
             mid_x = (bid_x + ask_x) / 2.0
             notional = pos.qty_y * mid_y + pos.qty_x * mid_x
             self._risk.update_pair_notional(pos.pair_id, notional)
+
+    def _check_pnl_stops(
+        self, quotes: dict[str, dict[str, float]],
+    ) -> None:
+        """Force-exit positions that have breached their per-pair PnL stop."""
+        from types import SimpleNamespace
+
+        from stat_arb.engine.signals import SignalEvent
+        from stat_arb.execution.sizing import SizeResult
+
+        breached = [
+            (key, pos)
+            for key, pos in self._active_positions.items()
+            if self._risk.check_pair_pnl_stop(pos.pair_id)
+        ]
+        for pair_key, pos in breached:
+            self._active_positions.pop(pair_key, None)
+            size = SizeResult(
+                qty_y=pos.qty_y, qty_x=pos.qty_x,
+                notional_y=0.0, notional_x=0.0,
+            )
+            # Build a synthetic STOP event for order construction
+            pair_ns = SimpleNamespace(
+                symbol_y=pos.symbol_y, symbol_x=pos.symbol_x,
+            )
+            event = SignalEvent(
+                signal=Signal.STOP,
+                pair=pair_ns,  # type: ignore[arg-type]
+                z_score=0.0,
+                estimated_round_trip_cost=0.0,
+            )
+            orders = build_orders(event, size, pos.pair_id, direction=pos.direction)
+            self._broker.submit_orders(orders)
+            self._risk.unregister_pair(pos.pair_id)
+            logger.warning(
+                "PNL STOP %s (pair_id=%d, pnl=%.2f)",
+                pair_key, pos.pair_id,
+                self._risk._pair_pnl.get(pos.pair_id, 0.0),
+            )
+            self._post_event(
+                EngineEventType.ORDER, EventSeverity.WARNING,
+                f"PnL stop: {pair_key} force-exited",
+            )
+
+    def _check_structural_breaks(self, today: date) -> None:
+        """Force-exit positions whose spread has structurally broken."""
+        if self._structural_break is None:
+            return
+
+        import numpy as np
+
+        from stat_arb.execution.sizing import SizeResult
+
+        # Need structural_break_window days of history
+        window = self._structural_break._window
+        from datetime import timedelta
+
+        start = today - timedelta(days=int(window * 2))  # safety margin for bdays
+
+        breached: list[tuple[str, _LivePosition]] = []
+        for pair_key, pos in self._active_positions.items():
+            df = self._price_repo.get_close_prices(
+                [pos.symbol_y, pos.symbol_x], start, today,
+            )
+            if df.empty or pos.symbol_y not in df.columns or pos.symbol_x not in df.columns:
+                continue
+            prices_y = df[pos.symbol_y].dropna().values.astype(np.float64)
+            prices_x = df[pos.symbol_x].dropna().values.astype(np.float64)
+
+            # Need the pair's QualifiedPair — look it up from the engine's active pairs
+            qp = None
+            for p in self._engine._wf.active_pairs:
+                if p.symbol_y == pos.symbol_y and p.symbol_x == pos.symbol_x:
+                    qp = p
+                    break
+            if qp is None:
+                # Also check rolling scheduler if available
+                if hasattr(self._engine, "_rolling") and self._engine._rolling:
+                    for p in self._engine._rolling.active_pairs:
+                        if p.symbol_y == pos.symbol_y and p.symbol_x == pos.symbol_x:
+                            qp = p
+                            break
+            if qp is None:
+                continue
+
+            if self._structural_break.check_pair(qp, prices_y, prices_x):
+                breached.append((pair_key, pos))
+
+        for pair_key, pos in breached:
+            self._active_positions.pop(pair_key, None)
+            size = SizeResult(
+                qty_y=pos.qty_y, qty_x=pos.qty_x,
+                notional_y=0.0, notional_x=0.0,
+            )
+            from types import SimpleNamespace
+
+            from stat_arb.engine.signals import SignalEvent
+
+            pair_ns = SimpleNamespace(
+                symbol_y=pos.symbol_y, symbol_x=pos.symbol_x,
+            )
+            event = SignalEvent(
+                signal=Signal.STOP,
+                pair=pair_ns,  # type: ignore[arg-type]
+                z_score=0.0,
+                estimated_round_trip_cost=0.0,
+            )
+            orders = build_orders(event, size, pos.pair_id, direction=pos.direction)
+            self._broker.submit_orders(orders)
+            self._risk.unregister_pair(pos.pair_id)
+            logger.warning(
+                "STRUCTURAL BREAK %s (pair_id=%d) — force-exited",
+                pair_key, pos.pair_id,
+            )
+            self._post_event(
+                EngineEventType.ORDER, EventSeverity.WARNING,
+                f"Structural break: {pair_key} force-exited",
+            )
 
     def _fetch_quotes(self) -> dict[str, dict[str, float]]:
         """Fetch real-time quotes from Schwab, or synthetic quotes from DB."""

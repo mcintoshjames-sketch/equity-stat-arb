@@ -6,7 +6,7 @@ objects ready for broker submission.
 
 from __future__ import annotations
 
-from stat_arb.config.constants import OrderSide, Signal
+from stat_arb.config.constants import OrderSide, PositionDirection, Signal
 from stat_arb.engine.signals import SignalEvent
 from stat_arb.execution.broker_base import Order
 from stat_arb.execution.sizing import SizeResult
@@ -16,6 +16,7 @@ def build_orders(
     event: SignalEvent,
     size: SizeResult,
     pair_id: int,
+    direction: PositionDirection | None = None,
 ) -> list[Order]:
     """Build broker orders from a signal event and size result.
 
@@ -23,16 +24,16 @@ def build_orders(
 
     - **LONG_SPREAD** → BUY Y + SELL X (entry)
     - **SHORT_SPREAD** → SELL Y + BUY X (entry)
-    - **EXIT / STOP** → reverse of entry (exit)
+    - **EXIT / STOP** → reverse of entry (exit), direction-aware
     - **FLAT** → no orders
-
-    For EXIT/STOP, the caller must have tracked the original direction.
-    EXIT reverses LONG_SPREAD (SELL Y + BUY X), STOP reverses similarly.
 
     Args:
         event: Signal event with signal type and pair info.
         size: Sizing result with share quantities per leg.
         pair_id: Database pair identifier for order tracking.
+        direction: Original position direction (LONG or SHORT).
+            Required for EXIT/STOP to reverse correctly.
+            Defaults to LONG behavior when None.
 
     Returns:
         List of ``Order`` objects (0, 1, or 2 orders).
@@ -80,10 +81,26 @@ def build_orders(
         ]
 
     # EXIT or STOP — reverse the position (is_entry=False)
-    # EXIT reverses: sell Y leg, buy X leg (assuming was long spread)
-    # The caller pipeline must track direction; here we default to
-    # closing a long-spread position.  For short-spread exits the
-    # caller swaps before calling.
+    if direction == PositionDirection.SHORT:
+        # SHORT entry was SELL Y + BUY X → exit is BUY Y + SELL X
+        return [
+            Order(
+                symbol=pair.symbol_y,
+                side=OrderSide.BUY,
+                quantity=size.qty_y,
+                pair_id=pair_id,
+                is_entry=False,
+            ),
+            Order(
+                symbol=pair.symbol_x,
+                side=OrderSide.SELL,
+                quantity=size.qty_x,
+                pair_id=pair_id,
+                is_entry=False,
+            ),
+        ]
+
+    # Default (LONG or None): LONG entry was BUY Y + SELL X → exit is SELL Y + BUY X
     return [
         Order(
             symbol=pair.symbol_y,

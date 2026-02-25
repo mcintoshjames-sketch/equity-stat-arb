@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from stat_arb.config.constants import OrderSide, Signal
+from stat_arb.config.constants import OrderSide, PositionDirection, Signal
 from stat_arb.config.settings import SchwabBrokerConfig, SignalConfig, SizingConfig
 from stat_arb.discovery.pair_filter import QualifiedPair
 from stat_arb.engine.signals import SignalEvent
@@ -106,13 +106,49 @@ class TestBuildOrders:
         assert orders[0].side == OrderSide.SELL
         assert orders[1].side == OrderSide.BUY
 
-    def test_exit_orders(self) -> None:
-        """EXIT → reverse sides with is_entry=False."""
+    def test_exit_long_spread(self) -> None:
+        """EXIT with LONG direction → SELL Y + BUY X."""
+        event = _make_event(Signal.EXIT)
+        size = SizeResult(qty_y=10, qty_x=15, notional_y=500.0, notional_x=750.0)
+        orders = build_orders(event, size, pair_id=3, direction=PositionDirection.LONG)
+        assert len(orders) == 2
+        assert all(not o.is_entry for o in orders)
+        assert orders[0].symbol == "AAA"
+        assert orders[0].side == OrderSide.SELL
+        assert orders[1].symbol == "BBB"
+        assert orders[1].side == OrderSide.BUY
+
+    def test_exit_short_spread(self) -> None:
+        """EXIT with SHORT direction → BUY Y + SELL X (reverses short entry)."""
+        event = _make_event(Signal.EXIT)
+        size = SizeResult(qty_y=10, qty_x=15, notional_y=500.0, notional_x=750.0)
+        orders = build_orders(event, size, pair_id=3, direction=PositionDirection.SHORT)
+        assert len(orders) == 2
+        assert all(not o.is_entry for o in orders)
+        # SHORT entry was SELL Y + BUY X → exit is BUY Y + SELL X
+        assert orders[0].symbol == "AAA"
+        assert orders[0].side == OrderSide.BUY
+        assert orders[1].symbol == "BBB"
+        assert orders[1].side == OrderSide.SELL
+
+    def test_exit_default_direction(self) -> None:
+        """EXIT without direction defaults to LONG (backward compat)."""
         event = _make_event(Signal.EXIT)
         size = SizeResult(qty_y=10, qty_x=15, notional_y=500.0, notional_x=750.0)
         orders = build_orders(event, size, pair_id=3)
         assert len(orders) == 2
         assert all(not o.is_entry for o in orders)
+        assert orders[0].side == OrderSide.SELL
+        assert orders[1].side == OrderSide.BUY
+
+    def test_stop_short_spread(self) -> None:
+        """STOP with SHORT direction → BUY Y + SELL X."""
+        event = _make_event(Signal.STOP)
+        size = SizeResult(qty_y=10, qty_x=15, notional_y=500.0, notional_x=750.0)
+        orders = build_orders(event, size, pair_id=3, direction=PositionDirection.SHORT)
+        assert len(orders) == 2
+        assert orders[0].side == OrderSide.BUY
+        assert orders[1].side == OrderSide.SELL
 
     def test_flat_returns_empty(self) -> None:
         """FLAT signal → no orders."""

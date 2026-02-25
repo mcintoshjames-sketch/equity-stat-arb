@@ -31,6 +31,7 @@ class Order:
     quantity: int
     pair_id: int
     is_entry: bool
+    limit_price: float | None = None
 
 
 @dataclass(frozen=True)
