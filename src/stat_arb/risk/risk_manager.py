@@ -65,6 +65,7 @@ class RiskManager:
         self._pair_sectors: dict[int, str] = {}
         self._entries_this_step: int = 0
         self._pair_pnl: dict[int, float] = {}
+        self._pair_notionals: dict[int, float] = {}
         self._pair_cohorts: dict[int, str] = {}
 
     def check(
@@ -226,16 +227,23 @@ class RiskManager:
         return max(0.0, (self._peak - portfolio_value) / self._peak)
 
     def register_pair(
-        self, pair_id: int, sector: str, cohort_id: str | None = None,
+        self,
+        pair_id: int,
+        sector: str,
+        cohort_id: str | None = None,
+        gross_notional: float = 0.0,
     ) -> None:
-        """Register a pair's sector and cohort for concentration tracking.
+        """Register a pair's sector, cohort, and notional for tracking.
 
         Args:
             pair_id: Unique pair identifier.
             sector: Sector classification.
             cohort_id: Optional discovery cohort identifier.
+            gross_notional: Initial gross notional for the pair.
         """
         self._pair_sectors[pair_id] = sector
+        if gross_notional > 0:
+            self._pair_notionals[pair_id] = gross_notional
         if cohort_id:
             self._pair_cohorts[pair_id] = cohort_id
 
@@ -248,6 +256,7 @@ class RiskManager:
         self._pair_sectors.pop(pair_id, None)
         self._pair_cohorts.pop(pair_id, None)
         self._pair_pnl.pop(pair_id, None)
+        self._pair_notionals.pop(pair_id, None)
 
     def reset_step_counters(self) -> None:
         """Reset per-step entry counter. Call at start of each step."""
@@ -265,6 +274,15 @@ class RiskManager:
             unrealized_pnl: Current unrealized dollar PnL.
         """
         self._pair_pnl[pair_id] = unrealized_pnl
+
+    def update_pair_notional(self, pair_id: int, gross_notional: float) -> None:
+        """Update the current gross notional for a pair.
+
+        Args:
+            pair_id: Unique pair identifier.
+            gross_notional: Current gross notional (sum of abs leg values).
+        """
+        self._pair_notionals[pair_id] = gross_notional
 
     def check_pair_pnl_stop(self, pair_id: int) -> bool:
         """Check whether a pair has breached its PnL stop.
@@ -293,11 +311,18 @@ class RiskManager:
         return self._kill_switch_active
 
     def _sector_gross(self, sector: str, broker: ExecutionBroker) -> float:
-        """Estimate gross exposure for a given sector.
+        """Compute gross exposure for a given sector using tracked notionals.
 
-        Approximates by counting pairs in the sector as a fraction of
-        total gross exposure.
+        Falls back to count-based approximation when no notionals are
+        tracked (backward compatibility).
         """
+        if self._pair_notionals:
+            return sum(
+                self._pair_notionals.get(pid, 0.0)
+                for pid, s in self._pair_sectors.items()
+                if s == sector
+            )
+        # Fallback: count-based approximation
         total_pairs = len(self._pair_sectors)
         if total_pairs == 0:
             return 0.0

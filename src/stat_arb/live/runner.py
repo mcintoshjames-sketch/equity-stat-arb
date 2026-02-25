@@ -126,6 +126,7 @@ class LiveRunner:
                 self._broker.update_quotes(quotes)
 
             self._risk.reset_step_counters()
+            self._update_pair_metrics(quotes)
 
             # Refresh earnings blackout cache
             if self._risk._earnings is not None:
@@ -397,7 +398,12 @@ class LiveRunner:
             return
 
         orders = build_orders(event, size, pair_id)
-        self._broker.submit_orders(orders)
+        fills = self._broker.submit_orders(orders)
+
+        # Extract per-leg fill prices
+        fill_prices: dict[str, float] = {}
+        for fill in fills:
+            fill_prices[fill.symbol] = fill.price
 
         direction = (
             PositionDirection.LONG
@@ -408,9 +414,19 @@ class LiveRunner:
             direction=direction,
             pair_id=pair_id,
             entry_date=date.today(),
+            symbol_y=event.pair.symbol_y,
+            symbol_x=event.pair.symbol_x,
+            qty_y=size.qty_y,
+            qty_x=size.qty_x,
+            entry_price_y=fill_prices.get(event.pair.symbol_y, mid_y),
+            entry_price_x=fill_prices.get(event.pair.symbol_x, mid_x),
+            sector=event.pair.sector,
         )
         cohort_id = getattr(event.pair, "cohort_id", None)
-        self._risk.register_pair(pair_id, event.pair.sector, cohort_id=cohort_id)
+        self._risk.register_pair(
+            pair_id, event.pair.sector, cohort_id=cohort_id,
+            gross_notional=size.gross_notional,
+        )
         self._risk.record_entry()
         logger.info("ENTRY %s %s (pair_id=%d)", pair_key, direction.value, pair_id)
 
@@ -484,6 +500,48 @@ class LiveRunner:
                 EngineEventType.ORDER, EventSeverity.INFO,
                 f"Rebalance: {rb.pair_key} ROLLOVER",
             )
+
+    def _update_pair_metrics(
+        self, quotes: dict[str, dict[str, float]],
+    ) -> None:
+        """Update pair PnL and notional for all active positions.
+
+        PnL uses adverse (liquidation) prices: sell at bid, cover at ask.
+        Notional uses mid prices for sector concentration tracking.
+        """
+        for pos in self._active_positions.values():
+            q_y = quotes.get(pos.symbol_y)
+            q_x = quotes.get(pos.symbol_x)
+            if q_y is None or q_x is None:
+                continue
+
+            bid_y = q_y.get("bid", 0.0)
+            ask_y = q_y.get("ask", 0.0)
+            bid_x = q_x.get("bid", 0.0)
+            ask_x = q_x.get("ask", 0.0)
+
+            if pos.direction == PositionDirection.LONG:
+                # Long spread: long Y, short X
+                # Exit: sell Y at bid, cover X at ask
+                pnl = (
+                    pos.qty_y * (bid_y - pos.entry_price_y)
+                    + pos.qty_x * (pos.entry_price_x - ask_x)
+                )
+            else:
+                # Short spread: short Y, long X
+                # Exit: cover Y at ask, sell X at bid
+                pnl = (
+                    pos.qty_y * (pos.entry_price_y - ask_y)
+                    + pos.qty_x * (bid_x - pos.entry_price_x)
+                )
+
+            self._risk.update_pair_pnl(pos.pair_id, pnl)
+
+            # Notional uses mid prices for sector concentration
+            mid_y = (bid_y + ask_y) / 2.0
+            mid_x = (bid_x + ask_x) / 2.0
+            notional = pos.qty_y * mid_y + pos.qty_x * mid_x
+            self._risk.update_pair_notional(pos.pair_id, notional)
 
     def _fetch_quotes(self) -> dict[str, dict[str, float]]:
         """Fetch real-time quotes from Schwab, or synthetic quotes from DB."""
@@ -579,16 +637,34 @@ class LiveRunner:
 
 
 class _LivePosition:
-    """Minimal tracking for an active live position."""
+    """Tracking for an active live position with fill data."""
 
-    __slots__ = ("direction", "pair_id", "entry_date")
+    __slots__ = (
+        "direction", "pair_id", "entry_date",
+        "symbol_y", "symbol_x", "qty_y", "qty_x",
+        "entry_price_y", "entry_price_x", "sector",
+    )
 
     def __init__(
         self,
         direction: PositionDirection,
         pair_id: int,
         entry_date: date,
+        symbol_y: str = "",
+        symbol_x: str = "",
+        qty_y: int = 0,
+        qty_x: int = 0,
+        entry_price_y: float = 0.0,
+        entry_price_x: float = 0.0,
+        sector: str = "",
     ) -> None:
         self.direction = direction
         self.pair_id = pair_id
         self.entry_date = entry_date
+        self.symbol_y = symbol_y
+        self.symbol_x = symbol_x
+        self.qty_y = qty_y
+        self.qty_x = qty_x
+        self.entry_price_y = entry_price_y
+        self.entry_price_x = entry_price_x
+        self.sector = sector

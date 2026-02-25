@@ -170,6 +170,102 @@ class TestRiskManager:
         rm.unregister_pair(1)
         assert len(rm._pair_sectors) == 1
 
+    def test_edge_over_slippage_rejection(self) -> None:
+        """Entry rejected when edge/slippage ratio is below default (500)."""
+        # Default min_edge_over_slippage is 500.0
+        cfg = RiskConfig(max_gross_exposure=100_000.0, max_sector_pct=1.0)
+        rm = RiskManager(cfg)
+
+        # gross_notional=1000, rt_cost=10 → ratio=100 < 500
+        event = _make_event(Signal.LONG_SPREAD)
+        event = SignalEvent(
+            signal=Signal.LONG_SPREAD,
+            pair=_make_pair(),
+            z_score=-2.5,
+            estimated_round_trip_cost=10.0,
+        )
+        size = SizeResult(qty_y=10, qty_x=10, notional_y=500, notional_x=500)
+        decision = rm.check(event, size, _mock_broker(), active_pair_count=0)
+        assert decision.decision == RiskDecisionType.REJECTED
+        assert "edge/slippage" in decision.reason
+
+    def test_edge_over_slippage_approval(self) -> None:
+        """Entry approved when edge/slippage ratio exceeds threshold."""
+        cfg = RiskConfig(max_gross_exposure=100_000.0, max_sector_pct=1.0)
+        rm = RiskManager(cfg)
+
+        # gross_notional=1000, rt_cost=1 → ratio=1000 > 500
+        event = SignalEvent(
+            signal=Signal.LONG_SPREAD,
+            pair=_make_pair(),
+            z_score=-2.5,
+            estimated_round_trip_cost=1.0,
+        )
+        size = SizeResult(qty_y=10, qty_x=10, notional_y=500, notional_x=500)
+        decision = rm.check(event, size, _mock_broker(), active_pair_count=0)
+        assert decision.decision == RiskDecisionType.APPROVED
+
+    def test_sector_cap_notional_based(self) -> None:
+        """Sector concentration uses actual notionals when tracked."""
+        cfg = RiskConfig(
+            max_sector_pct=0.30,
+            max_gross_exposure=10_000.0,
+        )
+        rm = RiskManager(cfg)
+        # Register pairs with notional tracking
+        rm.register_pair(1, "tech", gross_notional=2500.0)
+        rm.register_pair(2, "financials", gross_notional=500.0)
+
+        # Tech has $2500 notional.  New $1000 trade →
+        # sector_pct = (2500 + 1000) / 10_000 = 0.35 > 0.30
+        event = _make_event(Signal.LONG_SPREAD, sector="tech")
+        size = SizeResult(qty_y=10, qty_x=10, notional_y=500, notional_x=500)
+        decision = rm.check(event, size, _mock_broker(), active_pair_count=2)
+        assert decision.decision == RiskDecisionType.REJECTED
+        assert "sector" in decision.reason
+
+    def test_sector_cap_notional_updated(self) -> None:
+        """Sector concentration reflects updated notionals."""
+        cfg = RiskConfig(
+            max_sector_pct=0.50,
+            max_gross_exposure=10_000.0,
+        )
+        rm = RiskManager(cfg)
+        rm.register_pair(1, "tech", gross_notional=1000.0)
+        # Update notional to a higher value
+        rm.update_pair_notional(1, 4500.0)
+
+        # Tech now at $4500.  New $1000 trade →
+        # sector_pct = (4500 + 1000) / 10_000 = 0.55 > 0.50
+        event = _make_event(Signal.LONG_SPREAD, sector="tech")
+        size = SizeResult(qty_y=10, qty_x=10, notional_y=500, notional_x=500)
+        decision = rm.check(event, size, _mock_broker(), active_pair_count=1)
+        assert decision.decision == RiskDecisionType.REJECTED
+        assert "sector" in decision.reason
+
+    def test_unregister_cleans_notional_and_pnl(self) -> None:
+        """Unregistering a pair removes notional and PnL tracking."""
+        rm = RiskManager(RiskConfig())
+        rm.register_pair(1, "tech", gross_notional=1000.0)
+        rm.update_pair_pnl(1, -50.0)
+        assert 1 in rm._pair_notionals
+        assert 1 in rm._pair_pnl
+
+        rm.unregister_pair(1)
+        assert 1 not in rm._pair_notionals
+        assert 1 not in rm._pair_pnl
+        assert 1 not in rm._pair_sectors
+
+    def test_pair_pnl_stop_triggers(self) -> None:
+        """PnL stop correctly identifies breached pairs."""
+        cfg = RiskConfig(per_pair_pnl_stop=-200.0)
+        rm = RiskManager(cfg)
+        rm.update_pair_pnl(1, -100.0)
+        assert rm.check_pair_pnl_stop(1) is False
+
+        rm.update_pair_pnl(1, -250.0)
+        assert rm.check_pair_pnl_stop(1) is True
+
 
 # ---------------------------------------------------------------------------
 # StructuralBreakMonitor

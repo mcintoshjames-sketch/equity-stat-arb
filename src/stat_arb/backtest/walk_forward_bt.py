@@ -182,7 +182,11 @@ class WalkForwardBacktest:
                         continue
 
                     orders = build_orders(event, size, pair_id)
-                    self._broker.submit_orders(orders)
+                    fills = self._broker.submit_orders(orders)
+
+                    fill_prices: dict[str, float] = {}
+                    for fill in fills:
+                        fill_prices[fill.symbol] = fill.price
 
                     direction = (
                         PositionDirection.LONG
@@ -197,10 +201,19 @@ class WalkForwardBacktest:
                         pair_id=pair_id,
                         signed_qty_y=sign * size.qty_y,
                         signed_qty_x=-sign * size.qty_x,
+                        symbol_y=event.pair.symbol_y,
+                        symbol_x=event.pair.symbol_x,
+                        entry_price_y=fill_prices.get(
+                            event.pair.symbol_y, mid_y,
+                        ),
+                        entry_price_x=fill_prices.get(
+                            event.pair.symbol_x, mid_x,
+                        ),
                     )
                     cohort_id = getattr(event.pair, "cohort_id", None)
                     self._risk.register_pair(
                         pair_id, event.pair.sector, cohort_id=cohort_id,
+                        gross_notional=size.gross_notional,
                     )
                     self._risk.record_entry()
 
@@ -213,6 +226,24 @@ class WalkForwardBacktest:
                     self._close_position(
                         pos, pair_key, event, current_date, result,
                     )
+
+            # Update pair PnL for risk stop checks
+            for pos in active_positions.values():
+                p_y = prices.get(pos.symbol_y)
+                p_x = prices.get(pos.symbol_x)
+                if p_y is None or p_x is None:
+                    continue
+                if pos.direction == PositionDirection.LONG:
+                    pnl = (
+                        abs(pos.signed_qty_y) * (p_y - pos.entry_price_y)
+                        + abs(pos.signed_qty_x) * (pos.entry_price_x - p_x)
+                    )
+                else:
+                    pnl = (
+                        abs(pos.signed_qty_y) * (pos.entry_price_y - p_y)
+                        + abs(pos.signed_qty_x) * (p_x - pos.entry_price_x)
+                    )
+                self._risk.update_pair_pnl(pos.pair_id, pnl)
 
             # Record equity point
             portfolio_value = self._broker.get_portfolio_value()
@@ -416,6 +447,7 @@ class _OpenPosition:
     __slots__ = (
         "direction", "entry_date", "entry_z", "pair_id",
         "signed_qty_y", "signed_qty_x",
+        "symbol_y", "symbol_x", "entry_price_y", "entry_price_x",
     )
 
     def __init__(
@@ -426,6 +458,10 @@ class _OpenPosition:
         pair_id: int,
         signed_qty_y: int,
         signed_qty_x: int,
+        symbol_y: str = "",
+        symbol_x: str = "",
+        entry_price_y: float = 0.0,
+        entry_price_x: float = 0.0,
     ) -> None:
         self.direction = direction
         self.entry_date = entry_date
@@ -433,3 +469,7 @@ class _OpenPosition:
         self.pair_id = pair_id
         self.signed_qty_y = signed_qty_y
         self.signed_qty_x = signed_qty_x
+        self.symbol_y = symbol_y
+        self.symbol_x = symbol_x
+        self.entry_price_y = entry_price_y
+        self.entry_price_x = entry_price_x

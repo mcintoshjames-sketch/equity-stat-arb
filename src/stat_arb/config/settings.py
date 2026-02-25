@@ -266,7 +266,7 @@ class RiskConfig(BaseModel):
     max_gross_exposure: float = 25_000.0
     max_sector_pct: float = 0.30
     max_drawdown_pct: float = 0.10
-    min_edge_over_slippage: float = 0.0
+    min_edge_over_slippage: float = 500.0
     structural_break_window: int = 60
     structural_break_pvalue: float = 0.10
     max_entries_per_step: int = 3
