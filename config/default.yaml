@@ -51,7 +51,6 @@ universe:
       - COP
       - SLB
       - EOG
-      - PXD
       - MPC
       - VLO
       - PSX
