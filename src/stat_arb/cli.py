@@ -15,9 +15,14 @@ import sys
 from datetime import date
 
 import click
+from dotenv import load_dotenv
 
 # Ensure src/ is importable when running from the repo root.
 sys.path.insert(0, "src")
+
+# Load .env file so SCHWAB_APP_KEY, SCHWAB_APP_SECRET, etc. are available
+# to load_config() env var overrides.
+load_dotenv()
 
 
 # ---------------------------------------------------------------------------
@@ -25,21 +30,30 @@ sys.path.insert(0, "src")
 # ---------------------------------------------------------------------------
 
 
-def _build_core(cfg):
+def _build_core(cfg, *, use_rolling: bool = True):
     """Wire up the core engine components shared by backtest and live.
 
+    Args:
+        cfg: Application configuration.
+        use_rolling: When True (default), create a RollingScheduler and
+            pass it to the engine.  When False, use the legacy walk-forward
+            scheduler only.
+
     Returns:
-        (engine, walk_forward, sizer, risk_manager, price_repo, universe, schwab_client)
+        (engine, walk_forward, sizer, risk_manager, price_repo, universe,
+         schwab_client, rolling_scheduler)
     """
     from stat_arb.data.db import create_tables, init_db
     from stat_arb.data.price_repo import PriceRepository
     from stat_arb.data.schwab_client import SchwabDataClient
     from stat_arb.data.universe import load_universe
     from stat_arb.discovery.pair_discovery import PairDiscovery
+    from stat_arb.engine.rolling_scheduler import RollingScheduler
     from stat_arb.engine.signals import SignalGenerator
     from stat_arb.engine.spread import SpreadComputer
     from stat_arb.engine.stat_arb_engine import StatArbEngine
     from stat_arb.engine.walk_forward import WalkForwardScheduler
+    from stat_arb.execution.rebalancer import InventoryRebalancer
     from stat_arb.execution.sizing import PositionSizer
     from stat_arb.logging_config import setup_logging
     from stat_arb.risk.risk_manager import RiskManager
@@ -64,7 +78,34 @@ def _build_core(cfg):
     signal_generator = SignalGenerator(cfg.signal)
     walk_forward = WalkForwardScheduler(cfg.walk_forward)
     sizer = PositionSizer(cfg.sizing)
-    risk_manager = RiskManager(cfg.risk)
+    rebalancer = InventoryRebalancer(cfg.sizing)
+
+    # Optional earnings blackout via FMP API
+    earnings_blackout = None
+    if cfg.fmp.api_key is not None:
+        try:
+            from stat_arb.data.fmp_client import FmpClient
+            from stat_arb.risk.earnings_blackout import EarningsBlackout
+
+            fmp_client = FmpClient(cfg.fmp)
+            earnings_blackout = EarningsBlackout(fmp_client, cfg.fmp.earnings_blackout_days)
+            click.echo("FMP earnings blackout enabled.")
+        except Exception as exc:  # noqa: BLE001
+            click.echo(f"WARNING: FMP client init failed ({exc}); no earnings blackout.")
+    else:
+        click.echo("FMP_API_KEY not set — earnings blackout disabled.")
+
+    risk_manager = RiskManager(cfg.risk, earnings_blackout=earnings_blackout)
+
+    rolling_scheduler: RollingScheduler | None = None
+    if use_rolling:
+        rolling_scheduler = RollingScheduler(
+            config=cfg.rolling,
+            discovery_config=cfg.discovery,
+            pair_discovery=pair_discovery,
+            universe=universe,
+            price_repo=price_repo,
+        )
 
     engine = StatArbEngine(
         signal_config=cfg.signal,
@@ -74,9 +115,15 @@ def _build_core(cfg):
         walk_forward=walk_forward,
         pair_discovery=pair_discovery,
         universe=universe,
+        risk_manager=risk_manager,
+        rolling_scheduler=rolling_scheduler,
+        rebalancer=rebalancer,
     )
 
-    return engine, walk_forward, sizer, risk_manager, price_repo, universe, schwab_client
+    return (
+        engine, walk_forward, sizer, risk_manager,
+        price_repo, universe, schwab_client, rolling_scheduler,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +158,18 @@ def cli() -> None:
     help="Backtest end date (YYYY-MM-DD).",
 )
 @click.option("--persist", is_flag=True, help="Save results to the database.")
-def run_backtest(config_path: str, start, end, persist: bool) -> None:
-    """Run a walk-forward backtest over historical data."""
+@click.option(
+    "--walk-forward", "use_walk_forward", is_flag=True, default=False,
+    help="Use legacy discrete walk-forward windows instead of rolling scheduler.",
+)
+def run_backtest(
+    config_path: str, start, end, persist: bool, use_walk_forward: bool,
+) -> None:
+    """Run a backtest over historical data.
+
+    Defaults to rolling scheduler (matches live trading). Use --walk-forward
+    for the legacy discrete walk-forward mode.
+    """
     from stat_arb.backtest.sim_broker import SimBroker
     from stat_arb.backtest.walk_forward_bt import WalkForwardBacktest
     from stat_arb.config.settings import load_config
@@ -120,14 +177,27 @@ def run_backtest(config_path: str, start, end, persist: bool) -> None:
     start_date: date = start.date()
     end_date: date = end.date()
 
+    use_rolling = not use_walk_forward
     cfg = load_config(config_path)
-    engine, walk_forward, sizer, risk_manager, price_repo, universe, _ = _build_core(cfg)
+    engine, walk_forward, sizer, risk_manager, price_repo, universe, _, rolling = (
+        _build_core(cfg, use_rolling=use_rolling)
+    )
 
-    windows = walk_forward.generate_windows(start_date, end_date)
-    if not windows:
-        click.echo("ERROR: No walk-forward windows fit in the date range.")
-        raise SystemExit(1)
-    click.echo(f"Generated {len(windows)} walk-forward window(s)")
+    if use_walk_forward:
+        windows = walk_forward.generate_windows(start_date, end_date)
+        if not windows:
+            click.echo("ERROR: No walk-forward windows fit in the date range.")
+            raise SystemExit(1)
+        click.echo(f"Generated {len(windows)} walk-forward window(s)")
+    else:
+        # Rolling mode: still generate walk-forward windows as fallback
+        # but the engine will use the rolling scheduler
+        windows = walk_forward.generate_windows(start_date, end_date)
+        click.echo(
+            f"Rolling scheduler mode (discovery every "
+            f"{cfg.rolling.discovery_interval_days} bdays, "
+            f"expiry {cfg.rolling.trading_days} bdays)"
+        )
 
     sim_broker = SimBroker(slippage_bps=10.0)
 
@@ -236,15 +306,15 @@ def run_live(config_path: str, loop: bool, broker_override: str | None) -> None:
     from stat_arb.live.runner import LiveRunner
 
     cfg = load_config(config_path)
-    engine, walk_forward, sizer, risk_manager, price_repo, universe, schwab_client = (
-        _build_core(cfg)
+    engine, walk_forward, sizer, risk_manager, price_repo, universe, schwab_client, rolling = (
+        _build_core(cfg, use_rolling=True)
     )
 
-    # Generate walk-forward windows covering ~2 years ending today
+    # Generate walk-forward windows as fallback (rolling scheduler is primary)
     today = date.today()
     wf_start = today - timedelta(days=730)
     windows = walk_forward.generate_windows(wf_start, today)
-    if not windows:
+    if not windows and rolling is None:
         click.echo("WARNING: No walk-forward windows generated — discovery won't run.")
 
     broker_mode = BrokerMode(broker_override) if broker_override else cfg.broker_mode
@@ -273,3 +343,69 @@ def run_live(config_path: str, loop: bool, broker_override: str | None) -> None:
         runner.run_loop()
     else:
         runner.run_once()
+
+
+# ---------------------------------------------------------------------------
+# dashboard
+# ---------------------------------------------------------------------------
+
+
+@cli.command("dashboard")
+@click.option(
+    "--config", "config_path",
+    default="config/default.yaml",
+    show_default=True,
+    help="Path to YAML config file.",
+)
+@click.option(
+    "--broker-mode", "broker_override",
+    type=click.Choice(["paper", "live"], case_sensitive=False),
+    default=None,
+    help="Override broker_mode from config (default: paper).",
+)
+def dashboard(config_path: str, broker_override: str | None) -> None:
+    """Launch the TUI monitoring dashboard.
+
+    The dashboard is a passive DB monitor.  The engine runs independently
+    via ``stat-arb run-live --loop`` and communicates through DB tables.
+    """
+    from stat_arb.config.constants import BrokerMode
+    from stat_arb.config.settings import load_config
+    from stat_arb.data.db import create_tables, init_db
+    from stat_arb.data.schwab_client import SchwabDataClient
+    from stat_arb.logging_config import setup_logging
+    from stat_arb.tui.app import StatArbDashboard
+    from stat_arb.tui.data_provider import DbDataProvider
+
+    cfg = load_config(config_path)
+    broker_mode = BrokerMode(broker_override) if broker_override else cfg.broker_mode
+
+    # Lightweight DB init only — no engine wiring
+    setup_logging(cfg.logging)
+    init_db(cfg.database)
+    create_tables()
+
+    schwab_client: SchwabDataClient | None = None
+    try:
+        schwab_client = SchwabDataClient(cfg.schwab)
+    except Exception as exc:  # noqa: BLE001
+        click.echo(f"WARNING: Schwab client init failed ({exc}); dashboard in DB-only mode.")
+
+    provider = DbDataProvider(
+        risk_config=cfg.risk,
+        broker_mode=broker_mode.value,
+        schwab_client=schwab_client,
+        earnings_blackout_enabled=cfg.fmp.api_key is not None,
+    )
+
+    app_key = cfg.schwab.app_key.get_secret_value() if schwab_client else ""
+    callback_url = cfg.schwab.callback_url
+
+    app = StatArbDashboard(
+        provider=provider,
+        schwab_client=schwab_client,
+        callback_url=callback_url,
+        app_key=app_key,
+        broker_mode_str=broker_mode.value,
+    )
+    app.run()

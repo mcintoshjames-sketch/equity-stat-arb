@@ -1,0 +1,170 @@
+/* Stat-Arb TUI Dashboard Stylesheet */
+
+Screen {
+    layout: vertical;
+}
+
+/* --- Main Dashboard Screen --- */
+
+#top-row {
+    layout: horizontal;
+    height: auto;
+    max-height: 12;
+}
+
+#portfolio-panel {
+    width: 1fr;
+    border: solid $accent;
+}
+
+#risk-panel {
+    width: 1fr;
+    border: solid $accent;
+}
+
+/* Engine status bar */
+#engine-bar {
+    height: auto;
+    padding: 0 2;
+    background: $boost;
+    border: solid $accent;
+    text-style: bold;
+}
+
+/* Live mode warning banner */
+#live-warning {
+    height: auto;
+    padding: 0 2;
+    background: red;
+    color: white;
+    text-style: bold;
+    text-align: center;
+}
+
+#positions-panel {
+    border: solid $accent;
+    height: auto;
+    max-height: 18;
+    padding: 1 2;
+}
+
+#positions-panel > Static {
+    height: auto;
+}
+
+#bottom-row {
+    layout: horizontal;
+    height: auto;
+    max-height: 16;
+}
+
+#activity-panel {
+    width: 1fr;
+    border: solid $accent;
+}
+
+#system-kill-panel {
+    width: 1fr;
+    layout: vertical;
+}
+
+#system-panel {
+    width: 1fr;
+    height: auto;
+    border: solid $accent;
+}
+
+#kill-switch-panel {
+    height: auto;
+    padding: 1 2;
+}
+
+/* --- Kill switch widget internals --- */
+
+#kill-status {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#kill-btn {
+    width: 100%;
+}
+
+/* --- Pairs Detail Screen --- */
+
+#pairs-table-panel {
+    border: solid $accent;
+    height: 1fr;
+    padding: 1 2;
+}
+
+#pair-detail-panel {
+    border: solid $accent;
+    height: auto;
+    max-height: 10;
+    padding: 1 2;
+}
+
+/* --- Token Screen --- */
+
+#token-detail-panel {
+    border: solid $accent;
+    height: auto;
+    padding: 1 2;
+}
+
+#reauth-panel {
+    border: solid $accent;
+    height: auto;
+    padding: 1 2;
+}
+
+#reauth-panel Input {
+    margin: 1 0;
+}
+
+#reauth-panel Button {
+    margin: 1 0;
+}
+
+#reauth-status {
+    height: auto;
+    padding: 1 0;
+}
+
+/* --- Confirm dialog --- */
+
+#confirm-dialog {
+    width: 60;
+    height: auto;
+    border: thick $error;
+    background: $surface;
+    padding: 2 4;
+}
+
+#confirm-buttons {
+    width: 100%;
+    align: center middle;
+    margin-top: 2;
+}
+
+#confirm-buttons Button {
+    margin: 0 2;
+}
+
+/* --- Help Screen --- */
+
+#help-scroll {
+    height: 1fr;
+    padding: 1 2;
+}
+
+#help-text {
+    height: auto;
+}
+
+/* --- Footer --- */
+
+Footer {
+    dock: bottom;
+}

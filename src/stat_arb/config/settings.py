@@ -255,6 +255,9 @@ class RiskConfig(BaseModel):
         max_sector_pct: Maximum fraction of gross exposure in one sector.
         max_drawdown_pct: Circuit breaker — halt trading at this drawdown.
         min_edge_over_slippage: Minimum expected edge above estimated slippage.
+        max_entries_per_step: Maximum new entries allowed in a single step.
+        per_pair_pnl_stop: Dollar loss threshold to force-close a pair.
+        max_cohort_concentration: Maximum pairs from any single discovery cohort.
     """
 
     model_config = _FROZEN
@@ -266,6 +269,9 @@ class RiskConfig(BaseModel):
     min_edge_over_slippage: float = 0.0
     structural_break_window: int = 60
     structural_break_pvalue: float = 0.10
+    max_entries_per_step: int = 3
+    per_pair_pnl_stop: float = -200.0
+    max_cohort_concentration: int = 5
 
     @field_validator("max_sector_pct", "max_drawdown_pct")
     @classmethod
@@ -274,12 +280,84 @@ class RiskConfig(BaseModel):
             raise ValueError("percentage must be in (0, 1]")
         return v
 
-    @field_validator("max_pairs")
+    @field_validator("max_pairs", "max_entries_per_step", "max_cohort_concentration")
     @classmethod
     def _positive_pairs(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("max_pairs must be positive")
         return v
+
+
+# ---------------------------------------------------------------------------
+# Rolling scheduler
+# ---------------------------------------------------------------------------
+
+
+class RollingSchedulerConfig(BaseModel):
+    """Rolling discovery scheduler configuration.
+
+    Attributes:
+        formation_days: Trailing lookback window for cointegration discovery.
+        trading_days: Per-pair trading lifetime in business days.
+        discovery_interval_days: How often to re-run discovery (business days).
+        max_cohort_pairs: Maximum new pairs discovered per cycle.
+    """
+
+    model_config = _FROZEN
+
+    formation_days: int = 252
+    trading_days: int = 63
+    discovery_interval_days: int = 21
+    max_cohort_pairs: int = 5
+
+    @field_validator("formation_days", "trading_days",
+                     "discovery_interval_days", "max_cohort_pairs")
+    @classmethod
+    def _positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("rolling scheduler fields must be positive")
+        return v
+
+    @model_validator(mode="after")
+    def _interval_le_trading(self) -> RollingSchedulerConfig:
+        if self.discovery_interval_days > self.trading_days:
+            raise ValueError(
+                "discovery_interval_days must be <= trading_days"
+            )
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward window
+# ---------------------------------------------------------------------------
+
+
+class FmpConfig(BaseModel):
+    """Financial Modeling Prep API settings for earnings data.
+
+    Attributes:
+        api_key: FMP API key (optional — no blackout if absent).
+        earnings_blackout_days: Business days before earnings to block/exit.
+        cache_dir: Directory for persistent earnings cache (JSON).
+    """
+
+    model_config = _FROZEN
+
+    api_key: SecretStr | None = None
+    earnings_blackout_days: int = 3
+    cache_dir: str = "~/.stat_arb"
+
+    @field_validator("earnings_blackout_days")
+    @classmethod
+    def _non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("earnings_blackout_days must be >= 0")
+        return v
+
+    @field_validator("cache_dir")
+    @classmethod
+    def _expand_home(cls, v: str) -> str:
+        return str(Path(v).expanduser())
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +447,8 @@ class AppConfig(BaseModel):
     sizing: SizingConfig = SizingConfig()
     risk: RiskConfig = RiskConfig()
     walk_forward: WalkForwardConfig = WalkForwardConfig()
+    rolling: RollingSchedulerConfig = RollingSchedulerConfig()
+    fmp: FmpConfig = FmpConfig()
     database: DatabaseConfig = DatabaseConfig()
     logging: LoggingConfig = LoggingConfig()
     broker_mode: BrokerMode = BrokerMode.PAPER
@@ -422,5 +502,10 @@ def load_config(path: str | Path) -> AppConfig:
     # Allow env var override for broker mode
     if os.environ.get("BROKER_MODE"):
         raw["broker_mode"] = os.environ["BROKER_MODE"]
+
+    # Allow env var override for FMP API key
+    if os.environ.get("FMP_API_KEY"):
+        fmp = raw.setdefault("fmp", {})
+        fmp["api_key"] = os.environ["FMP_API_KEY"]
 
     return AppConfig(**raw)

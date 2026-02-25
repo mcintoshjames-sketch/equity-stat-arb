@@ -73,6 +73,7 @@ class ExitReason(StrEnum):
     TIMEOUT = "timeout"
     STRUCTURAL_BREAK = "structural_break"
     KILL_SWITCH = "kill_switch"
+    EARNINGS_BLACKOUT = "earnings_blackout"
 
 
 class AlertSeverity(StrEnum):
@@ -89,3 +90,33 @@ class RebalanceAction(StrEnum):
     ROLLOVER = "rollover"        # marginal delta rebalance
     FORCE_EXIT = "force_exit"    # pair dropped, full liquidation
     NO_CHANGE = "no_change"      # inventory already at target
+
+
+class EngineEventType(StrEnum):
+    """Types of events written by the engine to the DB."""
+
+    HEARTBEAT = "heartbeat"
+    STATE_CHANGED = "state_changed"
+    STEP_STARTED = "step_started"
+    STEP_COMPLETED = "step_completed"
+    SIGNAL = "signal"
+    ORDER = "order"
+    ERROR = "error"
+    KILL_SWITCH = "kill_switch"
+    ENGINE_STARTED = "engine_started"
+    ENGINE_STOPPED = "engine_stopped"
+
+
+class EventSeverity(StrEnum):
+    """Severity level for engine event rows."""
+
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+
+
+class EngineCommandType(StrEnum):
+    """Commands sent from the TUI to the engine via DB."""
+
+    KILL_SWITCH = "kill_switch"

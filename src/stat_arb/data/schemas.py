@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     Float,
@@ -247,3 +248,49 @@ class BacktestRun(Base):
 
     def __repr__(self) -> str:
         return f"<BacktestRun {self.start_date}–{self.end_date} sharpe={self.sharpe}>"
+
+
+# ---------------------------------------------------------------------------
+# Engine events & commands (engine ↔ TUI communication via DB)
+# ---------------------------------------------------------------------------
+
+
+class EngineEvent(Base):
+    """Activity log row written by the engine for TUI consumption.
+
+    Covers heartbeats, state changes, step lifecycle, signals, orders,
+    and errors.  The TUI polls this table to build its activity feed
+    and determine engine liveness.
+    """
+
+    __tablename__ = "engine_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    severity: Mapped[str] = mapped_column(String(10), nullable=False)
+    message: Mapped[str] = mapped_column(String(500), nullable=False)
+    detail_json: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_engine_events_type_created", "event_type", "created_at"),
+        Index("ix_engine_events_created", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<EngineEvent {self.event_type} [{self.severity}] {self.message[:40]}>"
+
+
+class EngineCommand(Base):
+    """Command row written by the TUI for engine consumption.
+
+    The engine polls for unacknowledged commands each iteration and
+    marks them acknowledged after processing.
+    """
+
+    __tablename__ = "engine_commands"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    command: Mapped[str] = mapped_column(String(30), nullable=False)
+    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

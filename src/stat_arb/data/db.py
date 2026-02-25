@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 
 if TYPE_CHECKING:
@@ -62,6 +62,19 @@ def init_db(config: DatabaseConfig) -> Engine:
         **pool_kwargs,
     )
     _session_factory = sessionmaker(bind=_engine)
+
+    # Enable WAL journal mode for SQLite — allows concurrent readers and
+    # a single writer across separate processes (engine + TUI).
+    if is_sqlite:
+        @event.listens_for(_engine, "connect")
+        def _set_sqlite_wal(dbapi_conn, connection_record):  # noqa: ARG001
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.close()
+
+        # Apply immediately for existing connections
+        with _engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
 
     logger.info("Database initialised: %s", config.url.split("@")[-1])
     return _engine

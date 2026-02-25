@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING
 
-from stat_arb.config.constants import PositionDirection, Signal
+from stat_arb.config.constants import ExitReason, PositionDirection, Signal
 
 if TYPE_CHECKING:
     from stat_arb.config.settings import SignalConfig
@@ -36,6 +36,7 @@ class SignalEvent:
     pair: QualifiedPair
     z_score: float
     estimated_round_trip_cost: float
+    exit_reason: ExitReason | None = None
 
 
 @dataclass

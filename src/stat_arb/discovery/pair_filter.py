@@ -30,7 +30,9 @@ class QualifiedPair:
     """Frozen formation parameters for a qualified cointegrated pair.
 
     Fields align 1:1 with the ``DiscoveredPair`` ORM schema for
-    direct persistence.
+    direct persistence.  Lifecycle fields (``discovery_date``,
+    ``trading_expiry``, ``cohort_id``) are optional and populated
+    by the rolling scheduler.
     """
 
     symbol_y: str
@@ -46,6 +48,25 @@ class QualifiedPair:
     coint_pvalue: float
     adf_pvalue: float
     hurst: float
+    discovery_date: date | None = None
+    trading_expiry: date | None = None
+    cohort_id: str | None = None
+
+
+def with_lifecycle(
+    pair: QualifiedPair,
+    discovery_date: date,
+    trading_expiry: date,
+    cohort_id: str,
+) -> QualifiedPair:
+    """Attach lifecycle metadata to a qualified pair via dataclass replace."""
+    from dataclasses import replace
+    return replace(
+        pair,
+        discovery_date=discovery_date,
+        trading_expiry=trading_expiry,
+        cohort_id=cohort_id,
+    )
 
 
 def _estimate_hurst(series: np.ndarray) -> float:

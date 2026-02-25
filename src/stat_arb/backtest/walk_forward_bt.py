@@ -25,7 +25,11 @@ from stat_arb.config.constants import (
     Signal,
 )
 from stat_arb.execution.order_builder import build_orders
-from stat_arb.execution.rebalancer import InventoryRebalancer, OpenPositionView
+from stat_arb.execution.rebalancer import (
+    InventoryRebalancer,
+    OpenPositionView,
+    RebalanceResult,
+)
 
 if TYPE_CHECKING:
     from stat_arb.backtest.sim_broker import SimBroker
@@ -136,8 +140,19 @@ class WalkForwardBacktest:
                     }
                     last_window_key = window_key
 
+            # Refresh earnings blackout cache
+            if self._risk._earnings is not None:
+                self._risk._earnings.refresh(self._universe.symbols, current_date)
+
             # Run engine step
+            self._risk.reset_step_counters()
             events = self._engine.step(current_date, quotes)
+
+            # Process rebalance orders from rolling scheduler
+            for rb in self._engine.pending_rebalance:
+                self._handle_rolling_rebalance(
+                    rb, active_positions, prices, current_date, result,
+                )
 
             for event in events:
                 if event.signal == Signal.FLAT:
@@ -161,6 +176,7 @@ class WalkForwardBacktest:
                     decision = self._risk.check(
                         event, size, self._broker,
                         len(active_positions),
+                        current_date=current_date,
                     )
                     if decision.decision.value != "approved":
                         continue
@@ -182,7 +198,11 @@ class WalkForwardBacktest:
                         signed_qty_y=sign * size.qty_y,
                         signed_qty_x=-sign * size.qty_x,
                     )
-                    self._risk.register_pair(pair_id, event.pair.sector)
+                    cohort_id = getattr(event.pair, "cohort_id", None)
+                    self._risk.register_pair(
+                        pair_id, event.pair.sector, cohort_id=cohort_id,
+                    )
+                    self._risk.record_entry()
 
                 elif event.signal in (Signal.EXIT, Signal.STOP):
                     # Exit signal
@@ -269,6 +289,53 @@ class WalkForwardBacktest:
                 pos.signed_qty_y += rb.delta_qty_y
                 pos.signed_qty_x += rb.delta_qty_x
 
+    def _handle_rolling_rebalance(
+        self,
+        rb: RebalanceResult,
+        active_positions: dict[str, _OpenPosition],
+        prices: dict[str, float],
+        current_date: date,
+        result: BacktestResult,
+    ) -> None:
+        """Process a rebalance result from the rolling scheduler."""
+        if rb.action == RebalanceAction.FORCE_EXIT:
+            pos = active_positions.pop(rb.pair_key, None)
+            if pos is None:
+                return
+            if rb.orders:
+                fills = self._broker.submit_orders(rb.orders)
+                pnl = sum(
+                    (-f.price * f.quantity if f.side.value == "BUY"
+                     else f.price * f.quantity)
+                    for f in fills
+                )
+            else:
+                pnl = 0.0
+            trade = TradeRecord(
+                pair_key=rb.pair_key,
+                signal=(
+                    Signal.LONG_SPREAD
+                    if pos.direction == PositionDirection.LONG
+                    else Signal.SHORT_SPREAD
+                ),
+                entry_date=pos.entry_date,
+                exit_date=current_date,
+                entry_z=pos.entry_z,
+                exit_z=0.0,
+                pnl=pnl,
+                exit_reason=ExitReason.STRUCTURAL_BREAK,
+            )
+            result.trades.append(trade)
+            self._risk.unregister_pair(pos.pair_id)
+
+        elif rb.action == RebalanceAction.ROLLOVER:
+            if rb.orders:
+                self._broker.submit_orders(rb.orders)
+            pos = active_positions.get(rb.pair_key)
+            if pos is not None:
+                pos.signed_qty_y += rb.delta_qty_y
+                pos.signed_qty_x += rb.delta_qty_x
+
     def _close_position(
         self,
         pos: _OpenPosition,
@@ -295,11 +362,14 @@ class WalkForwardBacktest:
             for f in fills
         )
 
-        exit_reason = (
-            ExitReason.MEAN_REVERSION
-            if event.signal == Signal.EXIT
-            else ExitReason.STOP_LOSS
-        )
+        # Prefer explicit exit_reason from engine-level force-exits
+        event_exit_reason = getattr(event, "exit_reason", None)
+        if event_exit_reason is not None:
+            exit_reason = event_exit_reason
+        elif event.signal == Signal.EXIT:
+            exit_reason = ExitReason.MEAN_REVERSION
+        else:
+            exit_reason = ExitReason.STOP_LOSS
 
         trade = TradeRecord(
             pair_key=pair_key,

@@ -11,21 +11,28 @@ The runner:
   2. Calls ``engine.step()`` to get signals.
   3. Sizes, risk-checks, and executes each signal through the configured broker.
   4. Tracks open positions and handles exits.
+  5. Writes ``EngineEvent`` rows to the DB for TUI consumption.
 
 Default broker is **paper** — real trading requires explicit ``--broker-mode=live``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import signal
+import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from stat_arb.config.constants import (
     BrokerMode,
+    EngineCommandType,
+    EngineEventType,
+    EventSeverity,
     PositionDirection,
+    RebalanceAction,
     Signal,
 )
 from stat_arb.execution.order_builder import build_orders
@@ -45,6 +52,9 @@ logger = logging.getLogger(__name__)
 # US market close in UTC (16:00 ET = 21:00 UTC, 20:00 UTC in summer)
 _MARKET_CLOSE_UTC_HOUR = 21
 _POST_CLOSE_BUFFER_MINUTES = 30
+
+# Heartbeat interval in seconds
+_HEARTBEAT_INTERVAL_S = 60
 
 
 class LiveRunner:
@@ -83,6 +93,7 @@ class LiveRunner:
         self._active_positions: dict[str, _LivePosition] = {}
         self._next_pair_id = 1
         self._shutdown = False
+        self._last_heartbeat: float = 0.0
 
     def run_once(self) -> int:
         """Execute a single trading step for today.
@@ -93,44 +104,89 @@ class LiveRunner:
         today = date.today()
         logger.info("=== Live step: %s (mode=%s) ===", today, self._broker_mode.value)
 
-        quotes = self._fetch_quotes()
-        if not quotes:
-            logger.warning("No quotes available — skipping step")
-            return 0
+        self._post_event(
+            EngineEventType.STATE_CHANGED, EventSeverity.INFO, "running",
+        )
+        self._post_event(
+            EngineEventType.STEP_STARTED, EventSeverity.INFO,
+            f"Scan started for {today}",
+        )
 
-        # Update paper broker quotes if applicable
-        if hasattr(self._broker, "update_quotes"):
-            self._broker.update_quotes(quotes)
+        try:
+            quotes = self._fetch_quotes()
+            if not quotes:
+                logger.warning("No quotes available — skipping step")
+                self._post_event(
+                    EngineEventType.STATE_CHANGED, EventSeverity.INFO, "idle",
+                )
+                return 0
 
-        events = self._engine.step(today, quotes)
+            # Update paper broker quotes if applicable
+            if hasattr(self._broker, "update_quotes"):
+                self._broker.update_quotes(quotes)
 
-        signals_processed = 0
-        for event in events:
-            if event.signal == Signal.FLAT:
-                continue
+            self._risk.reset_step_counters()
 
-            signals_processed += 1
-            pair_key = f"{event.pair.symbol_y}/{event.pair.symbol_x}"
+            # Refresh earnings blackout cache
+            if self._risk._earnings is not None:
+                self._risk._earnings.refresh(self._universe.symbols, today)
 
-            mid_y = self._mid_price(quotes, event.pair.symbol_y)
-            mid_x = self._mid_price(quotes, event.pair.symbol_x)
-            if mid_y is None or mid_x is None:
-                continue
+            events = self._engine.step(today, quotes)
 
-            if event.signal in (Signal.LONG_SPREAD, Signal.SHORT_SPREAD):
-                self._handle_entry(event, pair_key, mid_y, mid_x)
-            elif event.signal in (Signal.EXIT, Signal.STOP):
-                self._handle_exit(event, pair_key)
+            # Process rebalance orders from rolling scheduler
+            for rb in self._engine.pending_rebalance:
+                self._handle_rebalance(rb)
 
-        # Update risk peak
-        portfolio_value = self._broker.get_portfolio_value()
-        self._risk.update_peak(portfolio_value)
+            signals_processed = 0
+            for event in events:
+                if event.signal == Signal.FLAT:
+                    continue
 
-        logger.info(
-            "Step complete: %d signals, %d active positions, portfolio=$%.2f",
-            signals_processed,
-            len(self._active_positions),
-            portfolio_value,
+                signals_processed += 1
+                pair_key = f"{event.pair.symbol_y}/{event.pair.symbol_x}"
+
+                mid_y = self._mid_price(quotes, event.pair.symbol_y)
+                mid_x = self._mid_price(quotes, event.pair.symbol_x)
+                if mid_y is None or mid_x is None:
+                    continue
+
+                if event.signal in (Signal.LONG_SPREAD, Signal.SHORT_SPREAD):
+                    self._handle_entry(event, pair_key, mid_y, mid_x)
+                elif event.signal in (Signal.EXIT, Signal.STOP):
+                    self._handle_exit(event, pair_key)
+
+            # Update risk peak
+            portfolio_value = self._broker.get_portfolio_value()
+            self._risk.update_peak(portfolio_value)
+
+            logger.info(
+                "Step complete: %d signals, %d active positions, portfolio=$%.2f",
+                signals_processed,
+                len(self._active_positions),
+                portfolio_value,
+            )
+
+            self._post_event(
+                EngineEventType.STEP_COMPLETED, EventSeverity.INFO,
+                f"Scan complete: {signals_processed} signals, "
+                f"{len(self._active_positions)} pairs, ${portfolio_value:,.0f}",
+                json.dumps({
+                    "signals_count": signals_processed,
+                    "active_pairs": len(self._active_positions),
+                    "portfolio_value": portfolio_value,
+                }),
+            )
+        except Exception as exc:
+            self._post_event(
+                EngineEventType.ERROR, EventSeverity.ERROR, str(exc),
+            )
+            self._post_event(
+                EngineEventType.STATE_CHANGED, EventSeverity.INFO, "idle",
+            )
+            raise
+
+        self._post_event(
+            EngineEventType.STATE_CHANGED, EventSeverity.INFO, "idle",
         )
         return signals_processed
 
@@ -140,13 +196,22 @@ class LiveRunner:
         Sleeps until after market close, runs a step, then sleeps again.
         Handles SIGINT/SIGTERM for graceful shutdown.
         """
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        # Only register signal handlers from the main thread
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
 
         logger.info(
             "Starting live loop (mode=%s). Press Ctrl+C to stop.",
             self._broker_mode.value,
         )
+
+        self._prune_old_events()
+        self._post_event(
+            EngineEventType.ENGINE_STARTED, EventSeverity.INFO,
+            f"Engine started (mode={self._broker_mode.value})",
+        )
+        self._post_heartbeat()
 
         while not self._shutdown:
             now = datetime.now(UTC)
@@ -164,9 +229,11 @@ class LiveRunner:
                 )
                 # Sleep in short intervals for responsive shutdown
                 while wait_seconds > 0 and not self._shutdown:
-                    time.sleep(min(wait_seconds, 60.0))
+                    time.sleep(min(wait_seconds, 10.0))
                     now = datetime.now(UTC)
                     wait_seconds = (next_run - now).total_seconds()
+                    self._maybe_heartbeat()
+                    self._poll_commands()
 
             if self._shutdown:
                 break
@@ -176,12 +243,124 @@ class LiveRunner:
                 logger.info("Weekend — skipping to Monday")
                 continue
 
+            self._poll_commands()
+            if self._shutdown:
+                break
+
             try:
                 self.run_once()
             except Exception:
                 logger.exception("Error during live step — will retry next cycle")
 
+        self._post_event(
+            EngineEventType.ENGINE_STOPPED, EventSeverity.INFO,
+            "Engine stopped",
+        )
         logger.info("Live loop stopped.")
+
+    # ------------------------------------------------------------------
+    # Event writing
+    # ------------------------------------------------------------------
+
+    def _post_event(
+        self,
+        event_type: EngineEventType,
+        severity: EventSeverity,
+        message: str,
+        detail_json: str | None = None,
+    ) -> None:
+        """Insert an EngineEvent row. Never crashes the engine."""
+        try:
+            from stat_arb.data.db import get_session
+            from stat_arb.data.schemas import EngineEvent
+
+            session = get_session()
+            try:
+                session.add(EngineEvent(
+                    event_type=event_type.value,
+                    severity=severity.value,
+                    message=message[:500],
+                    detail_json=detail_json,
+                ))
+                session.commit()
+            finally:
+                session.close()
+        except Exception:
+            logger.debug("Failed to write engine event", exc_info=True)
+
+    def _post_heartbeat(self) -> None:
+        """Post a heartbeat event and update the timestamp."""
+        self._post_event(
+            EngineEventType.HEARTBEAT, EventSeverity.INFO, "heartbeat",
+        )
+        self._last_heartbeat = time.monotonic()
+
+    def _maybe_heartbeat(self) -> None:
+        """Post a heartbeat if enough time has elapsed."""
+        if time.monotonic() - self._last_heartbeat >= _HEARTBEAT_INTERVAL_S:
+            self._post_heartbeat()
+
+    # ------------------------------------------------------------------
+    # Command polling
+    # ------------------------------------------------------------------
+
+    def _poll_commands(self) -> None:
+        """Check for unacknowledged commands from the TUI."""
+        try:
+            from sqlalchemy import select
+
+            from stat_arb.data.db import get_session
+            from stat_arb.data.schemas import EngineCommand
+
+            session = get_session()
+            try:
+                stmt = select(EngineCommand).where(
+                    EngineCommand.acknowledged.is_(False),
+                )
+                commands = session.execute(stmt).scalars().all()
+
+                for cmd in commands:
+                    if cmd.command == EngineCommandType.KILL_SWITCH:
+                        self._risk._kill_switch_active = True
+                        self._shutdown = True
+                        self._post_event(
+                            EngineEventType.KILL_SWITCH, EventSeverity.CRITICAL,
+                            "Kill switch activated via TUI",
+                        )
+                        logger.critical("KILL SWITCH activated via DB command")
+
+                    cmd.acknowledged = True
+
+                if commands:
+                    session.commit()
+            finally:
+                session.close()
+        except Exception:
+            logger.debug("Failed to poll commands", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Event pruning
+    # ------------------------------------------------------------------
+
+    def _prune_old_events(self, days: int = 7) -> None:
+        """Delete engine events older than *days* to prevent unbounded growth."""
+        try:
+            from sqlalchemy import delete
+
+            from stat_arb.data.db import get_session
+            from stat_arb.data.schemas import EngineEvent
+
+            cutoff = datetime.now(UTC) - timedelta(days=days)
+            session = get_session()
+            try:
+                session.execute(
+                    delete(EngineEvent).where(EngineEvent.created_at < cutoff),
+                )
+                session.commit()
+            finally:
+                session.close()
+        except Exception:
+            logger.debug("Failed to prune old events", exc_info=True)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -194,12 +373,24 @@ class LiveRunner:
         if pair_key in self._active_positions:
             return  # already in position
 
+        z_score = getattr(event, "z_score", 0.0)
+        self._post_event(
+            EngineEventType.SIGNAL, EventSeverity.WARNING,
+            f"Signal: {pair_key} {event.signal.value} (z={z_score:+.2f})",
+            json.dumps({
+                "pair_key": pair_key,
+                "signal_type": event.signal.value,
+                "z_score": z_score,
+            }),
+        )
+
         size = self._sizer.size(mid_y, mid_x)
         pair_id = self._next_pair_id
         self._next_pair_id += 1
 
         decision = self._risk.check(
             event, size, self._broker, len(self._active_positions),
+            current_date=date.today(),
         )
         if decision.decision.value != "approved":
             logger.info("REJECTED %s: %s", pair_key, decision.reason)
@@ -218,8 +409,20 @@ class LiveRunner:
             pair_id=pair_id,
             entry_date=date.today(),
         )
-        self._risk.register_pair(pair_id, event.pair.sector)
+        cohort_id = getattr(event.pair, "cohort_id", None)
+        self._risk.register_pair(pair_id, event.pair.sector, cohort_id=cohort_id)
+        self._risk.record_entry()
         logger.info("ENTRY %s %s (pair_id=%d)", pair_key, direction.value, pair_id)
+
+        self._post_event(
+            EngineEventType.ORDER, EventSeverity.INFO,
+            f"Order: {pair_key} ENTRY {event.pair.symbol_y}/{event.pair.symbol_x}",
+            json.dumps({
+                "pair_key": pair_key,
+                "side": "ENTRY",
+                "symbol": f"{event.pair.symbol_y}/{event.pair.symbol_x}",
+            }),
+        )
 
     def _handle_exit(self, event, pair_key: str) -> None:
         """Execute an exit/stop signal."""
@@ -227,13 +430,60 @@ class LiveRunner:
         if pos is None:
             return
 
+        z_score = getattr(event, "z_score", 0.0)
+        self._post_event(
+            EngineEventType.SIGNAL, EventSeverity.WARNING,
+            f"Signal: {pair_key} {event.signal.value} (z={z_score:+.2f})",
+            json.dumps({
+                "pair_key": pair_key,
+                "signal_type": event.signal.value,
+                "z_score": z_score,
+            }),
+        )
+
         from stat_arb.execution.sizing import SizeResult
 
         size = SizeResult(qty_y=0, qty_x=0, notional_y=0, notional_x=0)
         orders = build_orders(event, size, pos.pair_id)
         self._broker.submit_orders(orders)
         self._risk.unregister_pair(pos.pair_id)
-        logger.info("EXIT %s %s (pair_id=%d)", pair_key, event.signal.value, pos.pair_id)
+
+        exit_reason = getattr(event, "exit_reason", None)
+        reason_str = exit_reason.value if exit_reason else event.signal.value
+        logger.info("EXIT %s %s (pair_id=%d)", pair_key, reason_str, pos.pair_id)
+
+        self._post_event(
+            EngineEventType.ORDER, EventSeverity.INFO,
+            f"Order: {pair_key} EXIT {reason_str}",
+        )
+
+    def _handle_rebalance(self, rb) -> None:
+        """Execute a rebalance result from the rolling scheduler."""
+        if rb.action == RebalanceAction.FORCE_EXIT:
+            pos = self._active_positions.pop(rb.pair_key, None)
+            if pos is None:
+                return
+            if rb.orders:
+                self._broker.submit_orders(rb.orders)
+            self._risk.unregister_pair(pos.pair_id)
+            logger.info("REBALANCE FORCE_EXIT %s (pair_id=%d)", rb.pair_key, pos.pair_id)
+            self._post_event(
+                EngineEventType.ORDER, EventSeverity.INFO,
+                f"Rebalance: {rb.pair_key} FORCE_EXIT",
+            )
+        elif rb.action == RebalanceAction.ROLLOVER:
+            if rb.orders:
+                self._broker.submit_orders(rb.orders)
+            logger.info(
+                "REBALANCE ROLLOVER %s beta=%.3f->%.3f",
+                rb.pair_key,
+                rb.old_beta or 0.0,
+                rb.new_beta or 0.0,
+            )
+            self._post_event(
+                EngineEventType.ORDER, EventSeverity.INFO,
+                f"Rebalance: {rb.pair_key} ROLLOVER",
+            )
 
     def _fetch_quotes(self) -> dict[str, dict[str, float]]:
         """Fetch real-time quotes from Schwab, or synthetic quotes from DB."""

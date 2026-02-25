@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING
 
 from stat_arb.config.constants import RiskDecisionType, Signal
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from stat_arb.engine.signals import SignalEvent
     from stat_arb.execution.broker_base import ExecutionBroker
     from stat_arb.execution.sizing import SizeResult
+    from stat_arb.risk.earnings_blackout import EarningsBlackout
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +53,19 @@ class RiskManager:
         config: Risk configuration with limits and thresholds.
     """
 
-    def __init__(self, config: RiskConfig) -> None:
+    def __init__(
+        self,
+        config: RiskConfig,
+        earnings_blackout: EarningsBlackout | None = None,
+    ) -> None:
         self._config = config
+        self._earnings = earnings_blackout
         self._peak: float = 0.0
         self._kill_switch_active: bool = False
         self._pair_sectors: dict[int, str] = {}
+        self._entries_this_step: int = 0
+        self._pair_pnl: dict[int, float] = {}
+        self._pair_cohorts: dict[int, str] = {}
 
     def check(
         self,
@@ -63,6 +73,7 @@ class RiskManager:
         size: SizeResult,
         broker: ExecutionBroker,
         active_pair_count: int,
+        current_date: date | None = None,
     ) -> RiskDecision:
         """Evaluate whether a signal should be executed.
 
@@ -71,6 +82,7 @@ class RiskManager:
             size: Proposed sizing for the trade.
             broker: Broker for exposure queries.
             active_pair_count: Number of currently active pairs.
+            current_date: Today's date for earnings blackout check.
 
         Returns:
             ``RiskDecision`` with APPROVED or REJECTED and reason.
@@ -97,6 +109,36 @@ class RiskManager:
                 decision=RiskDecisionType.REJECTED,
                 reason="kill switch active — drawdown limit breached",
             )
+
+        # 1a. Earnings blackout
+        if self._earnings is not None and current_date is not None:
+            blacked = self._earnings.pair_blacked_out(
+                event.pair.symbol_y, event.pair.symbol_x, current_date,
+            )
+            if blacked:
+                return RiskDecision(
+                    decision=RiskDecisionType.REJECTED,
+                    reason=f"earnings blackout for {blacked}",
+                )
+
+        # 1b. Max entries per step
+        if self._entries_this_step >= self._config.max_entries_per_step:
+            return RiskDecision(
+                decision=RiskDecisionType.REJECTED,
+                reason="max entries per step reached",
+            )
+
+        # 1c. Cohort concentration
+        cohort_id = getattr(event.pair, "cohort_id", None)
+        if cohort_id:
+            cohort_count = sum(
+                1 for c in self._pair_cohorts.values() if c == cohort_id
+            )
+            if cohort_count >= self._config.max_cohort_concentration:
+                return RiskDecision(
+                    decision=RiskDecisionType.REJECTED,
+                    reason=f"cohort {cohort_id} at max concentration",
+                )
 
         # 2. Max pairs
         if active_pair_count >= self._config.max_pairs:
@@ -183,22 +225,67 @@ class RiskManager:
             return 0.0
         return max(0.0, (self._peak - portfolio_value) / self._peak)
 
-    def register_pair(self, pair_id: int, sector: str) -> None:
-        """Register a pair's sector for concentration tracking.
+    def register_pair(
+        self, pair_id: int, sector: str, cohort_id: str | None = None,
+    ) -> None:
+        """Register a pair's sector and cohort for concentration tracking.
 
         Args:
             pair_id: Unique pair identifier.
             sector: Sector classification.
+            cohort_id: Optional discovery cohort identifier.
         """
         self._pair_sectors[pair_id] = sector
+        if cohort_id:
+            self._pair_cohorts[pair_id] = cohort_id
 
     def unregister_pair(self, pair_id: int) -> None:
-        """Remove a pair from sector tracking.
+        """Remove a pair from sector and cohort tracking.
 
         Args:
             pair_id: Unique pair identifier.
         """
         self._pair_sectors.pop(pair_id, None)
+        self._pair_cohorts.pop(pair_id, None)
+        self._pair_pnl.pop(pair_id, None)
+
+    def reset_step_counters(self) -> None:
+        """Reset per-step entry counter. Call at start of each step."""
+        self._entries_this_step = 0
+
+    def record_entry(self) -> None:
+        """Record a successful entry for per-step limiting."""
+        self._entries_this_step += 1
+
+    def update_pair_pnl(self, pair_id: int, unrealized_pnl: float) -> None:
+        """Update the unrealized PnL for a pair.
+
+        Args:
+            pair_id: Unique pair identifier.
+            unrealized_pnl: Current unrealized dollar PnL.
+        """
+        self._pair_pnl[pair_id] = unrealized_pnl
+
+    def check_pair_pnl_stop(self, pair_id: int) -> bool:
+        """Check whether a pair has breached its PnL stop.
+
+        Returns:
+            True if the pair should be force-closed.
+        """
+        pnl = self._pair_pnl.get(pair_id, 0.0)
+        return pnl <= self._config.per_pair_pnl_stop
+
+    def check_earnings_blackout(
+        self, symbol_y: str, symbol_x: str, as_of: date,
+    ) -> bool:
+        """Check if either leg is within earnings blackout.
+
+        Returns:
+            True if the pair should be force-exited.
+        """
+        if self._earnings is None:
+            return False
+        return self._earnings.pair_blacked_out(symbol_y, symbol_x, as_of) is not None
 
     @property
     def kill_switch_active(self) -> bool:
